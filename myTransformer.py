@@ -17,7 +17,6 @@ def subpatchTensor(x: torch.Tensor, subpatchSize: int):
             h_i * subpatchSize:(h_i + 1) * subpatchSize,
             w_i * subpatchSize:(w_i + 1) * subpatchSize
         ]
-        # print(f"patch shape: {patch.shape}")
         patches.append(patch)
 
     subpatched = torch.stack(patches).permute(1, 0, 2, 3, 4, 5)
@@ -56,10 +55,9 @@ class DeepPatchEmbed3D(nn.Module):
         super().__init__()
         encoder = nn.ModuleList([])
         channels.insert(0, inChannels)
-        print("Channels:", channels)
+        self.channels = channels
 
-        groups = [max(min(8, ch // 4), 1) for ch in channels]
-        print("Groups:", groups)
+        groups = [max(min(8, ch // 8), 1) for ch in channels]
         
         for i in range(len(channels) - 1):
             block = nn.ModuleList([])
@@ -77,16 +75,17 @@ class DeepPatchEmbed3D(nn.Module):
     def forward(self, x: torch.Tensor, nSubPatches: int):  # x: [B, N, C, D, H, W]
         B, N, C, D, H, W = x.shape
         x = x.reshape(B * N, C, D, H, W)
-        print("encoder in shape", x.shape)
-        # x = self.encoder(x)              # [B*N, emb_dim, ...]
         skips = []
         for i, block in enumerate(self.encoder):
             x = block(x)
-            print(f"Shape after layer {i}: {x.shape}")
             unpatched = unpatchTensor(x, nSubPatches)
             skips.append(unpatched)
-        print("encoder out shape", x.shape)
-        return x, skips
+
+        _, E, X, Y, Z = x.shape
+        x = x.permute(0, 2, 3, 4, 1)
+        x = x.reshape(B, N*X*Y*Z, E)
+
+        return x, skips, (B, N, E, X, Y, Z)
 
 class MyTransformer(nn.Module):
     def __init__(
@@ -117,20 +116,20 @@ class MyTransformer(nn.Module):
 
     def forward(self, x: torch.Tensor):
         # Embed patches
-        #TODO: Sub-patching here!
         subpatchSize = 64
         x, nSubPatches = subpatchTensor(x, subpatchSize)
-        print("subpatch shape:", x.shape)
-        x, skips = self.patch_embed(x, nSubPatches)  # [B, N, emb_dim]
-        print("patch embed shape:", x.shape)
-        print("Skips:", skips)
-        # Add positional encoding
+        x, skips, (B, N, E, X, Y, Z) = self.patch_embed(x, nSubPatches)  # [B, N, emb_dim]
+
         x = x + self.pos_embed
 
-        # Transformer encoder
         x: torch.Tensor = self.transformer(x)  # [B, N, emb_dim]
-        print("Transformer shape:", x.shape)
-        return x
+
+        # reshape to match conv shape
+        x = x.reshape(B*N, X, Y, Z, E)
+        x = x.permute(0, 4, 1, 2, 3)
+        x = unpatchTensor(x, nSubPatches)
+
+        return x, skips
 
 if __name__ == "__main__":
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")

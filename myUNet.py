@@ -56,11 +56,9 @@ class myUNet(torch.nn.Module):
         self.decoder = pretrainedModelArch.decoder
 
     def forward(self, x: torch.Tensor):
-        print("Incoming shape:", x.shape)
-        x = self.encoder(x)
-        print("latent shape:", x.shape)
-        x = self.decoder(x)
-        print("output shape:", x.shape)
+        x, skips = self.encoder(x)
+        skips[-1] = x
+        x = self.decoder(skips)
 
         return x
     
