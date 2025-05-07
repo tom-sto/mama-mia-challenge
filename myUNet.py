@@ -4,11 +4,8 @@ import json
 import importlib
 import os
 from dynamic_network_architectures.architectures.unet import PlainConvUNet
-from MAMAMIA.nnUNet.nnunetv2.training.dataloading.data_loader import nnUNetDataLoader, nnUNetDatasetBlosc2
-from MAMAMIA.nnUNet.nnunetv2.utilities.label_handling.label_handling import LabelManager
-from batchgenerators.dataloading.multi_threaded_augmenter import MultiThreadedAugmenter
 
-from Transformer import Encoder3D
+from myTransformer import MyTransformer
 
 def resolve_string_to_class(path: str):
     """Convert a string like 'torch.nn.Conv3d' to the actual class."""
@@ -39,8 +36,10 @@ def resolve_modules_in_dict(d: dict):
 
 class myUNet(torch.nn.Module):
     def __init__(self, 
-                 pretrainedModelArch: PlainConvUNet, 
-                 pretrainedModelPath: str = None, 
+                 pretrainedModelArch: PlainConvUNet,
+                 expectedChannels: list[int], 
+                 expectedStride: list[int],
+                 pretrainedModelPath: str = None,
                  ):
         super().__init__()
 
@@ -53,7 +52,7 @@ class myUNet(torch.nn.Module):
             decoderStateDict = {k.replace("decoder.", ""): v for k, v in stateDict.items() if "decoder" in k}
             pretrainedModelArch.decoder.load_state_dict(decoderStateDict, strict=False)
 
-        self.encoder = Encoder3D()
+        self.encoder = MyTransformer(expectedChannels, expectedStride)
         self.decoder = pretrainedModelArch.decoder
 
     def forward(self, x: torch.Tensor):

@@ -22,7 +22,11 @@ def setupTrainer(plansJSONPath: str,
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device)
     trainer.initialize()
 
-    model = myUNet(trainer.network, pretrainedModelPath)
+    kwargs = plans["configurations"][config]["architecture"]["arch_kwargs"]
+
+    expectedChannels = kwargs["features_per_stage"]
+    expectedStride = [x[0] for x in kwargs["strides"]]
+    model = myUNet(trainer.network, expectedChannels, expectedStride, pretrainedModelPath).to(device)
     trainer.network = model
 
     return trainer
