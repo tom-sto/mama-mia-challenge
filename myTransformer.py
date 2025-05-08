@@ -3,24 +3,19 @@ import torch.nn as nn
 
 def subpatchTensor(x: torch.Tensor, subpatchSize: int):
     assert len(x.shape) == 5, f"Expected shape (B, C, X, Y, Z). Got: {x.shape}"
-    patches = []
-    tensorShape = torch.tensor(x.shape)
-    patchSize = tensorShape[-3:]
-    indexShape = (tensorShape / subpatchSize).int()
-    numSubpatches = (patchSize / subpatchSize).prod().int().item()
-    for i in range(numSubpatches):
-        w_i = i % indexShape[-1]
-        h_i = (i // indexShape[-1]) % indexShape[-2]
-        d_i = (i // (indexShape[-1] * indexShape[-2])) % indexShape[-3]
-        patch = x[:, :,
-            d_i * subpatchSize:(d_i + 1) * subpatchSize,
-            h_i * subpatchSize:(h_i + 1) * subpatchSize,
-            w_i * subpatchSize:(w_i + 1) * subpatchSize
-        ]
-        patches.append(patch)
+    B, C, X, Y, Z = x.shape
+    assert X % subpatchSize == 0 and Y % subpatchSize == 0 and Z % subpatchSize == 0, \
+        "Input dimensions must be divisible by subpatchSize"
 
-    subpatched = torch.stack(patches).permute(1, 0, 2, 3, 4, 5)
-    return subpatched, numSubpatches
+    # Reshape into subpatches
+    x = x.unfold(2, subpatchSize, subpatchSize)  # Unfold X
+    x = x.unfold(3, subpatchSize, subpatchSize)  # Unfold Y
+    x = x.unfold(4, subpatchSize, subpatchSize)  # Unfold Z
+    x = x.permute(0, 2, 3, 4, 1, 5, 6, 7)  # [B, X//subpatchSize, Y//subpatchSize, Z//subpatchSize, C, subpatchSize, subpatchSize, subpatchSize]
+    x = x.reshape(B, -1, C, subpatchSize, subpatchSize, subpatchSize)  # [B, N, C, subpatchSize, subpatchSize, subpatchSize]
+
+    numSubpatches = (X // subpatchSize) * (Y // subpatchSize) * (Z // subpatchSize)
+    return x, numSubpatches
 
 # this function undoes subpatching, returning a tensor to its original size
 # (B*N, C, P, P, P) -> (B, C, X, Y, Z)
@@ -29,26 +24,17 @@ def subpatchTensor(x: torch.Tensor, subpatchSize: int):
 def unpatchTensor(x: torch.Tensor, numSubpatches: int):
     assert len(x.shape) == 5, f"Expected shape (B*N, C, P, P, P). Got {x.shape}"
     B_N, C, P, _, _ = x.shape
-    B = B_N // numSubpatches
-    subpatchSize = P
     numSubpatchesPerDim = int(numSubpatches ** (1/3))
-    X = Y = Z = subpatchSize * numSubpatchesPerDim
+    X = Y = Z = P * numSubpatchesPerDim
 
-    # Initialize the output tensor
-    output = torch.zeros((B, C, X, Y, Z), device=x.device, dtype=x.dtype)
+    B = B_N // numSubpatches
 
-    for i in range(numSubpatches):
-        w_i = i % numSubpatchesPerDim
-        h_i = (i // numSubpatchesPerDim) % numSubpatchesPerDim
-        d_i = (i // (numSubpatchesPerDim ** 2)) % numSubpatchesPerDim
+    # Reshape back to original dimensions
+    x = x.view(B, numSubpatchesPerDim, numSubpatchesPerDim, numSubpatchesPerDim, C, P, P, P)
+    x = x.permute(0, 4, 1, 5, 2, 6, 3, 7)  # [B, C, X//P, P, Y//P, P, Z//P, P]
+    x = x.reshape(B, C, X, Y, Z)  # [B, C, X, Y, Z]
 
-        patch = x[i::numSubpatches]  # Select patches for each batch
-        output[:, :, 
-               d_i * subpatchSize:(d_i + 1) * subpatchSize,
-               h_i * subpatchSize:(h_i + 1) * subpatchSize,
-               w_i * subpatchSize:(w_i + 1) * subpatchSize] = patch
-
-    return output
+    return x
 
 class DeepPatchEmbed3D(nn.Module):
     def __init__(self, channels: list[int], inChannels: int, strides: list[int]):
@@ -75,9 +61,11 @@ class DeepPatchEmbed3D(nn.Module):
     def forward(self, x: torch.Tensor, nSubPatches: int):  # x: [B, N, C, D, H, W]
         B, N, C, D, H, W = x.shape
         x = x.reshape(B * N, C, D, H, W)
+        # print("\tReshaped x grad_fn:", x.grad_fn)
         skips = []
         for i, block in enumerate(self.encoder):
             x = block(x)
+            # print("\tAfter block x grad_fn:", x.grad_fn)
             unpatched = unpatchTensor(x, nSubPatches)
             skips.append(unpatched)
 
@@ -104,7 +92,7 @@ class MyTransformer(nn.Module):
 
         self.patch_embed = DeepPatchEmbed3D(channels, in_channels, strides)
 
-        self.pos_embed = nn.Parameter(torch.randn((self.emb_dim,), requires_grad=True))  # learnable position embedding
+        self.pos_embed = nn.Parameter(torch.randn((self.emb_dim,)), requires_grad=True)  # learnable position embedding
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.emb_dim,
@@ -115,19 +103,26 @@ class MyTransformer(nn.Module):
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_depth)
 
     def forward(self, x: torch.Tensor):
+        # print("X dist:", x.mean(), "+/-", x.std())
         # Embed patches
         subpatchSize = 64
+        # print("Input x grad:", x.requires_grad)
         x, nSubPatches = subpatchTensor(x, subpatchSize)
+        # print("Subpatched x grad:", x.grad_fn, " - nSubPatches:", nSubPatches)
         x, skips, (B, N, E, X, Y, Z) = self.patch_embed(x, nSubPatches)  # [B, N, emb_dim]
-
+        # print("patch embedded x grad_fn:", x.grad_fn)
+        # for i, s in enumerate(skips):
+        #     print(f"Skip {i} grad_fn: {s.grad_fn}")
         x = x + self.pos_embed
 
         x: torch.Tensor = self.transformer(x)  # [B, N, emb_dim]
+        # print("Transformer raw output grad_fn:", x.grad_fn)
 
         # reshape to match conv shape
         x = x.reshape(B*N, X, Y, Z, E)
         x = x.permute(0, 4, 1, 2, 3)
         x = unpatchTensor(x, nSubPatches)
+        # print("Final x grad_fn:", x.grad_fn)
 
         return x, skips
 
@@ -136,10 +131,14 @@ if __name__ == "__main__":
     ch = 2
     p = 128
     b = 2
-    imgname = r"./allTheData/HeatmapsAugmented/Training/00014_Image0.zarr"
-    x = torch.rand((b, ch, p, p, p))
-    subpatches = subpatchTensor(x)
+    # imgname = r"./allTheData/HeatmapsAugmented/Training/00014_Image0.zarr"
+    t = torch.rand((b, ch, p, p, p))
+    subpatches, n = subpatchTensor(t, 64)
     print(subpatches.shape)
+    x, y, z = subpatches.shape[-3:]
+    unpatched = unpatchTensor(subpatches.view(b*n, ch, x, y, z), n)
+    print(unpatched.shape)
+    print(torch.all(t == unpatched))
     # t = CrossPatchTransformerAE3D(device=device,
     #                               in_channels=ch,
     #                               out_channels=ch,
