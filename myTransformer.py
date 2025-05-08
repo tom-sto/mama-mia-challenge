@@ -81,8 +81,8 @@ class MyTransformer(nn.Module):
         channels,
         strides,
         in_channels=2,
-        transformer_depth=2,
-        num_heads=4,
+        transformer_depth=4,
+        num_heads=8,
     ):
         super().__init__()
 
@@ -102,10 +102,38 @@ class MyTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_depth)
 
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        # Initialize DeepPatchEmbed3D
+        def init_weights_deep_patch_embed(module):
+            if isinstance(module, nn.Conv3d):
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.GroupNorm):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+
+        self.patch_embed.apply(init_weights_deep_patch_embed)
+
+        # Initialize Transformer
+        def init_weights_transformer(module):
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+
+        self.transformer.apply(init_weights_transformer)
+
     def forward(self, x: torch.Tensor):
         # print("X dist:", x.mean(), "+/-", x.std())
+        P = x.shape[-1]
         # Embed patches
-        subpatchSize = 64
+        subpatchSize = P // 2
         # print("Input x grad:", x.requires_grad)
         x, nSubPatches = subpatchTensor(x, subpatchSize)
         # print("Subpatched x grad:", x.grad_fn, " - nSubPatches:", nSubPatches)

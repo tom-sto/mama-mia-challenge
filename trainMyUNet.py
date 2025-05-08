@@ -36,9 +36,9 @@ def train(trainer: nnUNetTrainer):
 
 if __name__ == "__main__":
     basepath = rf"{os.environ["nnUNet_preprocessed"]}\Dataset103_cropped_breast"
-    modelPath = rf"{basepath}\fold_1\checkpoint_final.pth"
+    # modelPath = rf"{basepath}\fold_1\checkpoint_final.pth"
     modelPath = None
-    plansPath = rf"{basepath}\nnUNetPlans.json"
+    plansPath = rf"{basepath}\nnUNetPlans_64patch.json"
     datasetPath = rf"{basepath}\dataset.json"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
