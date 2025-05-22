@@ -90,6 +90,9 @@ class MyTransformer(nn.Module):
         self.inChannels = in_channels
         self.emb_dim = channels[-1]
 
+        print(f"channels: {self.channels}")
+        print(f"inChannels: {self.inChannels}")
+
         self.patch_embed = DeepPatchEmbed3D(channels, in_channels, strides)
 
         self.pos_embed = nn.Parameter(torch.randn((self.emb_dim,)), requires_grad=True)  # learnable position embedding

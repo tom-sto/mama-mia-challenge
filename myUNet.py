@@ -37,6 +37,7 @@ def resolve_modules_in_dict(d: dict):
 class myUNet(torch.nn.Module):
     def __init__(self, 
                  pretrainedModelArch: PlainConvUNet,
+                 inChannels: int,
                  expectedChannels: list[int], 
                  expectedStride: list[int],
                  pretrainedModelPath: str = None,
@@ -52,7 +53,7 @@ class myUNet(torch.nn.Module):
             decoderStateDict = {k.replace("decoder.", ""): v for k, v in stateDict.items() if "decoder" in k}
             pretrainedModelArch.decoder.load_state_dict(decoderStateDict, strict=False)
 
-        self.encoder = MyTransformer(expectedChannels, expectedStride)
+        self.encoder = MyTransformer(expectedChannels, expectedStride, inChannels)
         self.decoder = pretrainedModelArch.decoder
 
     def forward(self, x: torch.Tensor):

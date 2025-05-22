@@ -2,4 +2,7 @@
 .vscode
 **pycache**
 outputs*
-*submission
+*submission*
+nnUNet_results
+runs
+notebooks
