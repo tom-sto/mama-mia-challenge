@@ -122,7 +122,7 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
                                         trainer.dataset_json["file_ending"],
                                         trainer.label_manager.foreground_regions if trainer.label_manager.has_regions else
                                         trainer.label_manager.foreground_labels,
-                                        trainer.label_manager.ignore_label, chill=True)
+                                        trainer.label_manager.ignore_label)
     
     trainer.print_to_log_file("Validation complete", also_print_to_console=True)
     trainer.print_to_log_file("Mean Validation Dice: ", (metrics['foreground_mean']["Dice"]),
