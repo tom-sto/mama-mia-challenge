@@ -17,7 +17,7 @@ Expected Inputs:
 - Clinical and imaging metadata (Excel file with 'dataset_info' sheet)
 - Ground truth and predicted PCR labels (simulated with random predictions in this template)
 Note:
-Replace the placeholder prediction generation with your model’s predicted probabilities and binary labels.
+Replace the placeholder prediction generation with your model's predicted probabilities and binary labels.
 
 Expected Outputs:
 - CSV file with subgroup predictions

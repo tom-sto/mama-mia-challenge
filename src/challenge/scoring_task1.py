@@ -27,7 +27,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import SimpleITK as sitk
-from src.challenge.metrics import compute_segmentation_metrics
+from .metrics import compute_segmentation_metrics
 
 # ----------------------------
 # Utility Functions
@@ -76,22 +76,21 @@ def plot_combined_segmentation_heatmaps(fairness_varibles_df, variable_1, variab
 # Main Execution
 # ----------------------------
 
-if __name__ == '__main__':
-
+def generate_scores(testingDir: str = "."):
     # Settings
     HD_MAX = 150
     alpha = 0.5  # Weight for balancing performance and fairness
-    selected_fairness_variables = ['age', 'menopausal_status', 'breast_density']
+    selected_fairness_variables = ['age', 'menopause', 'breast_density']
     # The challenge will also evaluate the breast density variable, but it is not included in all the training data
 
     # Define paths (modify as needed)
-    data_dir = '/path/to/dataset/root/directory'  # Path to the data directory
-    clinical_data_xlsx = '/path/to/clinical_and_imaging_info.xlsx' # Path to the clinical data
-    gt_segmentations = f'{data_dir}/segmentations' # Path to the ground truth expert segmentations
+    data_dir = r'F:\MAMA-MIA'  # Path to the data directory
+    clinical_data_xlsx = f'{data_dir}/clinical_and_imaging_info.xlsx' # Path to the clinical data
+    gt_segmentations = f'{data_dir}/segmentations/expert' # Path to the ground truth expert segmentations
     json_info_files = f'{data_dir}/patient_info_files' # Path to the patient JSON info files
-    pred_segmentations = f'{data_dir}/pred_segmentations' # Path to your predicted segmentations
-    output_csv = f'{data_dir}/results_task1.csv'
-    output_plots_dir = f'{data_dir}/plots'
+    pred_segmentations = f'{data_dir}/{testingDir}/pred_segmentations' # Path to your predicted segmentations
+    output_csv = f'{data_dir}/{testingDir}/results_task1.csv'
+    output_plots_dir = f'{data_dir}/{testingDir}/plots'
 
     # Read clinical data and get the fairness groups
     clinical_df = pd.read_excel(clinical_data_xlsx, sheet_name='dataset_info')
@@ -100,22 +99,23 @@ if __name__ == '__main__':
     # Modify age column values mapping them by age groups
     fairness_varibles_df['age'] = pd.cut(fairness_varibles_df['age'], bins=[0, 40, 50, 60, 70, 100], labels=['0-40', '41-50', '51-60', '61-70', '71+'])
     # Map the menopausal status values to 'pre', 'post', and 'unknown'
-    fairness_varibles_df['menopausal_status'] = fairness_varibles_df['menopausal_status'].fillna('unknown')
-    fairness_varibles_df['menopausal_status'] = fairness_varibles_df['menopausal_status'].apply(lambda x: 'pre' if 'peri' in x else x)
-    fairness_varibles_df['menopausal_status'] = fairness_varibles_df['menopausal_status'].apply(lambda x: 'post' if 'post' in x else x)
-    fairness_varibles_df['menopausal_status'] = fairness_varibles_df['menopausal_status'].apply(lambda x: 'pre' if 'pre' in x else x)
+    fairness_varibles_df['menopause'] = fairness_varibles_df['menopause'].fillna('unknown')
+    fairness_varibles_df['menopause'] = fairness_varibles_df['menopause'].apply(lambda x: 'pre' if 'peri' in x else x)
+    fairness_varibles_df['menopause'] = fairness_varibles_df['menopause'].apply(lambda x: 'post' if 'post' in x else x)
+    fairness_varibles_df['menopause'] = fairness_varibles_df['menopause'].apply(lambda x: 'pre' if 'pre' in x else x)
 
     # Create output directories if they do not exist
     os.makedirs(pred_segmentations, exist_ok=True)
     os.makedirs(output_plots_dir, exist_ok=True)
 
     # Read clinical data
-    patient_list = fairness_varibles_df['patient_id'].tolist()
     dice_scores = []
     hausdorff_distances = []
+    pred_patient_list = list(os.listdir(pred_segmentations))
+    pred_patient_list = [x.split(".")[0] for x in pred_patient_list if ".nii.gz" in x]
 
-    for idx, patient_id in enumerate(patient_list):
-        print(f'Processing patient {idx + 1}/{len(patient_list)}: {patient_id}')
+    for idx, patient_id in enumerate(pred_patient_list):
+        print(f'Processing patient {idx + 1}/{len(pred_patient_list)}: {patient_id}')
         # Read the segmentation files
         gt_file = os.path.join(gt_segmentations, f'{patient_id}.nii.gz')
         # Read it with SimpleITk and convert to numpy
@@ -129,8 +129,9 @@ if __name__ == '__main__':
         pred_mask = sitk.GetArrayFromImage(itk_image)
         
         metrics = compute_segmentation_metrics(gt_mask, pred_mask, hd_max=HD_MAX)
-        fairness_varibles_df.loc[patient_id, 'DSC'] = metrics['DSC']
-        fairness_varibles_df.loc[patient_id, 'NormHD'] = metrics['NormHD']
+        patient_id = str(patient_id).upper()
+        fairness_varibles_df.loc[fairness_varibles_df['patient_id']==patient_id, 'DSC'] = metrics['DSC']
+        fairness_varibles_df.loc[fairness_varibles_df['patient_id']==patient_id, 'NormHD'] = metrics['NormHD']
         dice_scores.append(metrics['DSC'])
         hausdorff_distances.append(metrics['NormHD'])
 
@@ -143,6 +144,9 @@ if __name__ == '__main__':
     performance_score = 0.5 * (np.mean(dice_scores) + (1 - np.mean(hausdorff_distances)))
     print(f'Performance score: {performance_score:.4f}')
     
+    upper_pred_patient_ids = [x.upper() for x in pred_patient_list]
+    fairness_varibles_df = fairness_varibles_df[fairness_varibles_df['patient_id'].isin(upper_pred_patient_ids)]
+
     # Compute fairness score across selected variables
     fairness_score_dict = {}
     for variable in selected_fairness_variables:
@@ -175,9 +179,9 @@ if __name__ == '__main__':
 
     # Save fairness heatmaps
     output_plot = os.path.join(output_plots_dir, 'heatmap_dsc_combined.png')
-    plot_combined_segmentation_heatmaps(fairness_varibles_df, 'age', 'breast_density', 'menopausal_status', 'Age', 'Breast Density',
+    plot_combined_segmentation_heatmaps(fairness_varibles_df, 'age', 'breast_density', 'menopause', 'Age', 'Breast Density',
                                         'Menopausal Status', output_plot,  metric='DSC', cmap='coolwarm_r') 
     output_plot = os.path.join(output_plots_dir, 'heatmap_normhd_combined.png')
-    plot_combined_segmentation_heatmaps(fairness_varibles_df, 'age', 'breast_density', 'menopausal_status', 'Age', 'Breast Density',
+    plot_combined_segmentation_heatmaps(fairness_varibles_df, 'age', 'breast_density', 'menopause', 'Age', 'Breast Density',
                                         'Menopausal Status', output_plot,  metric='NormHD', cmap='coolwarm')
 
