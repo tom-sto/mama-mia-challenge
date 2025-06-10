@@ -10,6 +10,7 @@ from MAMAMIA.nnUNet.nnunetv2.inference.predict_from_raw_data import nnUNetPredic
 from MAMAMIA.nnUNet.nnunetv2.evaluation.evaluate_predictions import compute_metrics_on_folder
 
 from myUNet import myUNet
+from xero import XERO
 
 writer = None
 
@@ -18,7 +19,8 @@ def setupTrainer(plansJSONPath: str,
                  fold: int, 
                  datasetJSONPath: str, 
                  device: torch.device,
-                 pretrainedModelPath: str = None):
+                 pretrainedModelPath: str = None,
+                 transformer: bool = True):
     
     with open(plansJSONPath, 'r', encoding="utf-8") as fp:
         plans = json.load(fp)
@@ -33,6 +35,9 @@ def setupTrainer(plansJSONPath: str,
 
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device)
     trainer.initialize()
+
+    if not transformer:
+        return trainer
 
     model = myUNet(trainer.network, nInChannels, expectedChannels, expectedStride, pretrainedModelPath).to(device)
     trainer.network = model
@@ -95,10 +100,18 @@ def train(trainer: nnUNetTrainer):
     torch.save(trainer.network.state_dict(), os.path.join(trainer.output_folder, "checkpoint_final_myUNet.pth"))
     trainer.on_train_end()
 
-def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = "./outputs"):
+def refine(trainer: nnUNetTrainer, state_dict_path: str):
     trainer.set_deep_supervision_enabled(False)
-    state_dict = torch.load(state_dict_path, map_location=trainer.device)
-    trainer.network.load_state_dict(state_dict)
+
+    predictor = nnUNetPredictor(tile_step_size=0.5, use_gaussian=True, use_mirroring=True,
+                                perform_everything_on_device=True, device=trainer.device, verbose=False,
+                                verbose_preprocessing=False, allow_tqdm=False)
+    xero = XERO(device=trainer.device).to(trainer.device)
+    xero.trainMe(trainer, predictor)
+
+def inference(trainer: nnUNetTrainer, state_dict_path: str, inputFolder: str, outputPath: str = "./outputs"):
+    trainer.set_deep_supervision_enabled(False)
+    state_dict = trainer.load_checkpoint(state_dict_path)
     trainer.network.eval()
 
     predictor = nnUNetPredictor(tile_step_size=0.5, use_gaussian=True, use_mirroring=True,
@@ -107,7 +120,7 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
     predictor.manual_initialization(trainer.network, trainer.plans_manager, trainer.configuration_manager,
                                     [state_dict], trainer.dataset_json, trainer.__class__.__name__,
                                     trainer.inference_allowed_mirroring_axes)
-    inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")
+    
 
     os.makedirs(outputPath, exist_ok=True)
     ret = predictor.predict_from_files(
@@ -159,6 +172,9 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     fold = 4
     trainer = setupTrainer(plansPath, "3d_fullres", fold, datasetPath, device, pretrainedModelPath)
-    state_dict_path = r"nnUNet_results\Dataset104_cropped_3ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4\checkpoint_final_myUNet.pth"
+    # state_dict_path = r"nnUNet_results\Dataset104_cropped_3ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4\checkpoint_final.pth"
+    state_dict_path = r"checkpoint_latest_myUNet.pth"
     # train(trainer)
-    inference(trainer, state_dict_path)
+    inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")
+    # inference(trainer, state_dict_path, inputFolder)
+    refine(trainer, state_dict_path)
