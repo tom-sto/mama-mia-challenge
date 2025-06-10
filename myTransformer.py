@@ -200,7 +200,7 @@ if __name__ == "__main__":
     b = 2
     # imgname = r"./allTheData/HeatmapsAugmented/Training/00014_Image0.zarr"
     t = torch.rand((b, ch, p, p, p))
-    subpatches, n = subpatchTensor(t, 64)
+    subpatches, n = subpatchTensor(t.clone(), 64)
     print(subpatches.shape)
     x, y, z = subpatches.shape[-3:]
     unpatched = unpatchTensor(subpatches.view(b*n, ch, x, y, z), n)
