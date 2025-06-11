@@ -94,16 +94,34 @@ class MyTransformer(nn.Module):
         print(f"inChannels: {self.inChannels}")
 
         self.patch_embed = DeepPatchEmbed3D(channels, in_channels, strides)
-
         self.pos_embed = nn.Parameter(torch.randn((self.emb_dim,)), requires_grad=True)  # learnable position embedding
+        
+        nMetadataInFeatures = 7             # 1 for age (linear), 2 for menopausal status (one-hot), 4 for breast density (one-hot)
+        nMetadataOutFeatures = num_heads    # needs to be divisible by num_heads
+        self.metadataEmbed = nn.Linear(nMetadataInFeatures, nMetadataOutFeatures)
+
+        ageMin = 21
+        ageMax = 77
+        self.ageEncode  = lambda x: torch.tensor([(x - ageMin) / (ageMax - ageMin)], dtype=torch.float32) if x is not None \
+            else torch.tensor([0.5], dtype=torch.float32)   # normalize age to [0, 1] range, default to 0.5 if None
+        self.menoEncode = lambda x: torch.tensor([1, 0]) if x == "pre" \
+            else torch.tensor([0, 1]) if x == "post" \
+            else torch.tensor([0, 0])
+        self.densityEncode = lambda x: torch.tensor([1, 0, 0, 0]) if x == "a" \
+            else torch.tensor([0, 1, 0, 0]) if x == "b" \
+            else torch.tensor([0, 0, 1, 0]) if x == "c" \
+            else torch.tensor([0, 0, 0, 1]) if x == "d" \
+            else torch.tensor([0, 0, 0, 0])
 
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.emb_dim,
+            d_model=self.emb_dim + nMetadataOutFeatures,
             nhead=num_heads,
-            dim_feedforward=self.emb_dim * 4,
+            dim_feedforward=(self.emb_dim + nMetadataOutFeatures) * 4,
             batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_depth)
+
+        self.fc_to_patches = nn.Linear(self.emb_dim + nMetadataOutFeatures, self.emb_dim)
 
         self._initialize_weights()
 
@@ -132,11 +150,11 @@ class MyTransformer(nn.Module):
 
         self.transformer.apply(init_weights_transformer)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, metadata: list = None):
         # print("X dist:", x.mean(), "+/-", x.std())
         P = x.shape[-1]
         # Embed patches
-        subpatchSize = P // 2
+        subpatchSize = P // 2       # split each patch into 8 subpatches
         # print("Input x grad:", x.requires_grad)
         x, nSubPatches = subpatchTensor(x, subpatchSize)
         # print("Subpatched x grad:", x.grad_fn, " - nSubPatches:", nSubPatches)
@@ -146,8 +164,26 @@ class MyTransformer(nn.Module):
         #     print(f"Skip {i} grad_fn: {s.grad_fn}")
         x = x + self.pos_embed
 
-        x: torch.Tensor = self.transformer(x)  # [B, N, emb_dim]
+        # print("Embedded x shape:", x.shape)
+
+        metadata_emb = torch.zeros(B, N, self.metadataEmbed.out_features, device=x.device)  # [B, N, nMetadataOutFeatures]
+        # print(metadata)
+        for idx, md in enumerate(metadata):
+            age = md['age']
+            menopausal_status = md['menopausal_status']
+            breast_density = md['breast_density']
+            age_emb = self.ageEncode(age).to(x.device)
+            meno_emb = self.menoEncode(menopausal_status).to(x.device)
+            density_emb = self.densityEncode(breast_density).to(x.device)
+            concat = torch.cat((age_emb, meno_emb, density_emb), dim=0).unsqueeze(0)  # [1, nMetadataInFeatures]
+            concat: torch.Tensor = self.metadataEmbed(concat)  # [1, nMetadataOutFeatures]
+            metadata_emb[idx] += concat.repeat(N, 1)  # [B, N, nMetadataOutFeatures]
+
+        x = torch.cat((x, metadata_emb), dim=-1)  # [B, N, emb_dim + nMetadataOutFeatures]
+
+        x: torch.Tensor = self.transformer(x)  # [B, N, emb_dim + nMetadataOutFeatures]
         # print("Transformer raw output grad_fn:", x.grad_fn)
+        x = self.fc_to_patches(x)  # [B, N, emb_dim]
 
         # reshape to match conv shape
         x = x.reshape(B*N, X, Y, Z, E)

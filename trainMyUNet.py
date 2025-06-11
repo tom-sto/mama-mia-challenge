@@ -1,7 +1,7 @@
 import torch
 import json
 import os
-import SimpleITK as sitk
+# import SimpleITK as sitk
 from transformers import get_cosine_schedule_with_warmup
 from torch.utils.tensorboard import SummaryWriter
 
@@ -13,12 +13,28 @@ from myUNet import myUNet
 
 writer = None
 
+def saveModel(trainer: nnUNetTrainer, filename: str):
+
+    checkpoint = {
+        'network_weights': trainer.network.state_dict(),
+        'optimizer_state': trainer.optimizer.state_dict(),
+        'grad_scaler_state': trainer.grad_scaler.state_dict() if trainer.grad_scaler is not None else None,
+        'logging': trainer.logger.get_checkpoint(),
+        '_best_ema': trainer._best_ema,
+        'current_epoch': trainer.current_epoch + 1,
+        'init_args': trainer.my_init_kwargs,
+        'trainer_name': trainer.__class__.__name__,
+        'inference_allowed_mirroring_axes': trainer.inference_allowed_mirroring_axes,
+    }
+    torch.save(checkpoint, filename)
+
 def setupTrainer(plansJSONPath: str,
                  config: str, 
                  fold: int, 
                  datasetJSONPath: str, 
                  device: torch.device,
-                 pretrainedModelPath: str = None):
+                 pretrainedModelPath: str = None,
+                 tag: str = "") -> nnUNetTrainer:
     
     with open(plansJSONPath, 'r', encoding="utf-8") as fp:
         plans = json.load(fp)
@@ -31,14 +47,17 @@ def setupTrainer(plansJSONPath: str,
         datasetInfo: dict = json.load(fp)
         nInChannels = len(datasetInfo["channel_names"])
 
-    trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device)
+    trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device, tag)
+    trainer.num_iterations_per_epoch = 200
+    trainer.num_val_iterations_per_epoch = 50
+    trainer.num_epochs = 2000
     trainer.initialize()
 
     model = myUNet(trainer.network, nInChannels, expectedChannels, expectedStride, pretrainedModelPath).to(device)
     trainer.network = model
 
     # change optimizer and scheduler
-    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
+    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-2)
 
     num_training_steps = trainer.num_epochs           # scheduler steps every epoch, not every batch
     num_warmup_steps = int(0.2 * num_training_steps)  # 20% warmup
@@ -48,14 +67,17 @@ def setupTrainer(plansJSONPath: str,
         num_warmup_steps=num_warmup_steps, 
         num_training_steps=num_training_steps
     )
-    # print loss fn
-    print(f"Loss function: {trainer.loss}")
 
     trainer.disable_checkpointing = True    # we will do this manually
 
     return trainer
 
-def train(trainer: nnUNetTrainer):
+def train(trainer: nnUNetTrainer, continue_training: bool = False):
+    if continue_training:
+        trainer.load_checkpoint(os.path.join(trainer.output_folder, 'checkpoint_latest.pth'))
+        print(f"Continuing training from epoch {trainer.current_epoch}")
+    else:
+        trainer.current_epoch = 0
     trainer.on_train_start()
 
     for epoch in range(trainer.current_epoch, trainer.num_epochs):
@@ -84,15 +106,16 @@ def train(trainer: nnUNetTrainer):
             trainer.on_validation_epoch_end(val_outputs)
 
         if epoch % trainer.save_every == 0 and trainer.current_epoch != (trainer.num_epochs - 1):
-            torch.save(trainer.network.state_dict(), os.path.join(trainer.output_folder, 'checkpoint_latest_myUNet.pth'))
+            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_latest_myUNet.pth'))
 
         # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
         if trainer._best_ema is None or trainer.logger.my_fantastic_logging['ema_fg_dice'][-1] > trainer._best_ema:
-            torch.save(trainer.network.state_dict(), os.path.join(trainer.output_folder, 'checkpoint_best_myUNet.pth'))
+            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_best_myUNet.pth'))
+            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_latest_myUNet.pth'))
 
         trainer.on_epoch_end()
     
-    torch.save(trainer.network.state_dict(), os.path.join(trainer.output_folder, "checkpoint_final_myUNet.pth"))
+    saveModel(trainer, os.path.join(trainer.output_folder, "checkpoint_final_myUNet.pth"))
     trainer.on_train_end()
 
 def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = "./outputs"):
@@ -128,37 +151,42 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
     trainer.print_to_log_file("Mean Validation Dice: ", (metrics['foreground_mean']["Dice"]),
                               also_print_to_console=True)
 
-def postProcess(segmentationPath: str):
-    from scipy.ndimage import label, binary_opening, binary_closing, binary_fill_holes
-    from numpy import ndarray, bincount
-    def getPrimaryTumor(seg_array: ndarray):
-        labeled_mask, _ = label(seg_array)
-        sizes = bincount(labeled_mask.ravel())
-        sizes[0] = 0  # background
-        largest_label = sizes.argmax()
-        primary_tumor = (labeled_mask == largest_label).astype(int)
-        return primary_tumor
+# def postProcess(segmentationPath: str):
+#     from scipy.ndimage import label, binary_opening, binary_closing, binary_fill_holes
+#     from numpy import ndarray, bincount
+#     def getPrimaryTumor(seg_array: ndarray):
+#         labeled_mask, _ = label(seg_array)
+#         sizes = bincount(labeled_mask.ravel())
+#         sizes[0] = 0  # background
+#         largest_label = sizes.argmax()
+#         primary_tumor = (labeled_mask == largest_label).astype(int)
+#         return primary_tumor
 
-    for seg in os.listdir(segmentationPath):
-        segPath = os.path.join(segmentationPath, seg)
-        segImg = sitk.ReadImage(segPath)
-        primaryTumorArr = getPrimaryTumor(sitk.GetArrayFromImage(segImg))
-        primaryTumorImg = sitk.GetImageFromArray(primaryTumorArr)
-        primaryTumorImg.CopyInformation(segImg)
-        sitk.WriteImage(primaryTumorImg, segPath)
+#     for seg in os.listdir(segmentationPath):
+#         segPath = os.path.join(segmentationPath, seg)
+#         segImg = sitk.ReadImage(segPath)
+#         primaryTumorArr = getPrimaryTumor(sitk.GetArrayFromImage(segImg))
+#         primaryTumorImg = sitk.GetImageFromArray(primaryTumorArr)
+#         primaryTumorImg.CopyInformation(segImg)
+#         sitk.WriteImage(primaryTumorImg, segPath)
 
 if __name__ == "__main__":
     writer = SummaryWriter()
     datasetName = "Dataset104_cropped_3ch_breast"
-    basepath = rf"{os.environ["nnUNet_preprocessed"]}\{datasetName}"
-    # pretrainedModelPath = rf"{os.environ["nnUNet_results"]}\Dataset103_cropped_breast\nnUNetTrainer__nnUNetPlans_64patch__3d_fullres\fold_4\checkpoint_final.pth"
-    pretrainedModelPath = None
-    plansPath = rf"{basepath}\nnUNetPlans.json"
-    datasetPath = rf"{basepath}\dataset.json"
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    basepath = rf"{os.environ["nnUNet_preprocessed"]}/{datasetName}"
+    pretrainedModelPath = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_4/checkpoint_final.pth"
+    plansPath = rf"{basepath}/nnUNetPlans.json"
+    datasetPath = rf"{basepath}/dataset.json"
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     fold = 4
-    trainer = setupTrainer(plansPath, "3d_fullres", fold, datasetPath, device, pretrainedModelPath)
-    state_dict_path = r"nnUNet_results\Dataset104_cropped_3ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4\checkpoint_final_myUNet.pth"
-    # train(trainer)
+    trainer = setupTrainer(plansPath, 
+                           "3d_fullres", 
+                           fold, 
+                           datasetPath, 
+                           device, 
+                           pretrainedModelPath, 
+                           tag="_transformer_again")
+    state_dict_path = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}_transformer/checkpoint_final_myUNet.pth"
+    train(trainer)
     inference(trainer, state_dict_path)
