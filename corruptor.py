@@ -1,12 +1,12 @@
 import SimpleITK as sitk
-import torch
 import numpy as np
 # from scipy.ndimage import binary_dilation
 from skimage.morphology import *
-import sys
-sys.path.append('./MAMAMIA')
-from MAMAMIA.src.visualization import *
-from MAMAMIA.src.preprocessing import read_segmentation_from_patient_id
+import os
+# import sys
+# sys.path.append('./MAMAMIA')
+# from MAMAMIA.src.visualization import *
+# from MAMAMIA.src.preprocessing import read_segmentation_from_patient_id
 from trainMyUNet import setupTrainer, inference
 
 def WriteBinaryArrayToFile(arr, filepath, origin, spacing, direction):
@@ -14,9 +14,10 @@ def WriteBinaryArrayToFile(arr, filepath, origin, spacing, direction):
     img.SetOrigin(origin)
     img.SetSpacing(spacing)
     img.SetDirection(direction)
-    sitk.WriteImage(img, filepath + ".nii.gz", useCompression=True, )
+    sitk.WriteImage(img, filepath + ".nii.gz", useCompression=True, compressionLevel=-4)
 
 def generateSegmentations():
+    import torch
     datasetName = "Dataset104_cropped_3ch_breast"
     basepath = rf"{os.environ["nnUNet_preprocessed"]}\{datasetName}"
     pretrainedModelPath = None
@@ -52,7 +53,7 @@ def generateKernel(shape: tuple[int], p: float = 0.5):
     kernel = np.where(kernel < p, 1, 0).astype(np.uint8)
     return kernel
 
-def corruptSegmentations(inputDir = './segDataRaw', outputDir='./segDataCorrupted'):
+def corruptSegmentations(inputDir = './segDataRaw', outputDir=r'E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds'):
     dirs = ["training", "validation", "testing"]
     for d in dirs:
         os.makedirs(os.path.join(outputDir, d), exist_ok=True)
@@ -62,15 +63,13 @@ def corruptSegmentations(inputDir = './segDataRaw', outputDir='./segDataCorrupte
             patientID = imgName.split('.')[0]
             img = sitk.ReadImage(imgPath)
             origin, spacing, direction = img.GetOrigin(), img.GetSpacing(), img.GetDirection()
-            ogSize = img.GetSize()      # z, y, x order
             arr = sitk.GetArrayFromImage(img)
 
             if np.all(arr == 0):
-                zeros = np.zeros(shape=(32, 32, 32))
-                # minCoords = (0, 0, 0)
+                zeros = np.zeros_like(arr)
                 outArrs = [zeros, zeros, zeros, zeros]
                 for i, array in enumerate(outArrs):
-                    WriteBinaryArrayToFile(array, os.path.join(outputDir, d, patientID + f"_{i}"), origin, spacing, direction)
+                    WriteBinaryArrayToFile(array, os.path.join(outputDir, d, patientID + f"_{i}_0000"), origin, spacing, direction)
                 print()
                 print(f"{patientID} had no foreground in this prediction, writing all zeros for augmentations.")
                 print(f"Finished corrupting {imgPath}")
@@ -137,9 +136,32 @@ def corruptSegmentations(inputDir = './segDataRaw', outputDir='./segDataCorrupte
             outArrs = [arr, dilation_arr, erosion_arr, both_arr]
 
             for i, array in enumerate(outArrs):
-                WriteBinaryArrayToFile(array, os.path.join(outputDir, d, patientID + f"_{i}"), origin, spacing, direction)
+                WriteBinaryArrayToFile(array, os.path.join(outputDir, d, patientID + f"_{i}_0000"), origin, spacing, direction)
 
             print(f"Finished corrupting {imgPath}", end='\r')
+
+    # print("Doing bullshi")
+    # import shutil
+    # for file in os.listdir(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\imagesTr"):
+    #     src = os.path.join(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\imagesTr", file)
+    #     dst = file.split('.')[0] + '_0000.nii.gz'
+    #     dst = os.path.join(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\imagesTr", dst)
+    #     shutil.move(src, dst)
+
+    # for file in os.listdir(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\imagesTs"):
+    #     src = os.path.join(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\imagesTs", file)
+    #     dst = file.split('.')[0] + '_0000.nii.gz'
+    #     dst = os.path.join(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\imagesTs", dst)
+    #     shutil.move(src, dst)
+
+    # for file in os.listdir(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\labelsTr"):
+    #     src = os.path.join(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\labelsTr", file)
+    #     for i in range(4):
+    #         dst = file.split('.')[0] + f'_{i}.nii.gz'
+    #         dst = os.path.join(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\labelsTr", dst)
+    #         shutil.copy(src, dst)
+
+    #     os.remove(src)
 
 
 def main():

@@ -10,18 +10,19 @@ from corruptor import ReadBinaryArrayFromFile
 class MyRefiner(torch.nn.Module):
     def __init__(self,
                  dropout_p: float = 0.2,
-                 num_blocks: int = 4,
                  down_channels: list[int] = [1, 8, 32, 64, 128],
-                 up_channels: list[int] = [1, 8, 32, 64, 128],
+                 up_channels: list[int] = [2, 8, 32, 64, 128],      # end with 2 channels so nnUNet trainer can do cross-entropy loss
                  n_bottleneck_layers: int = 3
     ):
         super(MyRefiner, self).__init__()
+        assert len(down_channels) == len(up_channels), 'Need up channels and down channels to be the same length. \
+                                                        This is a symmetric network!'
         encoderSteps    = nn.ModuleList([])
         bottleneckSteps = nn.ModuleList([])
         decoderSteps    = nn.ModuleList([])
 
         # learnable threshold for final reconstruction of binary segmentation from logits
-        self.threshold = nn.Parameter(torch.tensor(0.5), requires_grad=True)
+        num_blocks = len(down_channels) - 1
 
         # Populate the encoder and decoder modules symmetrically (Order is important here!)
         for i in range(num_blocks):
@@ -82,26 +83,26 @@ class MyRefiner(torch.nn.Module):
 
         return soft_mask
     
-# make a dataloader that takes a filename, reads the binary array from file, and gets the ground truth from E:\MAMA-MIA\segmentations\expert
-class MyRefinerDataset(torch.utils.data.Dataset):
-    def __init__(self, file_paths: list[str], ground_truth_dir: str):
-        self.file_paths = file_paths
-        self.ground_truth_dir = ground_truth_dir
+# # make a dataloader that takes a filename, reads the binary array from file, and gets the ground truth from E:\MAMA-MIA\segmentations\expert
+# class MyRefinerDataset(torch.utils.data.Dataset):
+#     def __init__(self, file_paths: list[str], ground_truth_dir: str):
+#         self.file_paths = file_paths
+#         self.ground_truth_dir = ground_truth_dir
 
-    def __len__(self):
-        return len(self.file_paths)
+#     def __len__(self):
+#         return len(self.file_paths)
 
-    def __getitem__(self, idx: int):
-        file_path = self.file_paths[idx]
-        binary_array = ReadBinaryArrayFromFile(file_path)
+#     def __getitem__(self, idx: int):
+#         file_path = self.file_paths[idx]
+#         binary_array = ReadBinaryArrayFromFile(file_path)
         
-        # Get the patient ID from the file name
-        patient_id = file_path.split('/')[-1].split('.')[0][:-2]    # remove the augmentation id
-        ground_truth_path = f"{self.ground_truth_dir}/{patient_id}.nii.gz"
-        ground_truth_image = sitk.ReadImage(ground_truth_path)
+#         # Get the patient ID from the file name
+#         patient_id = file_path.split('/')[-1].split('.')[0][:-2]    # remove the augmentation id
+#         ground_truth_path = f"{self.ground_truth_dir}/{patient_id}.nii.gz"
+#         ground_truth_image = sitk.ReadImage(ground_truth_path)
         
-        # Convert SimpleITK image to numpy array and then to tensor
-        ground_truth_array = sitk.GetArrayFromImage(ground_truth_image)
-        ground_truth_tensor = torch.from_numpy(ground_truth_array, dtype=torch.float32).unsqueeze(0)  # Add channel dimension
+#         # Convert SimpleITK image to numpy array and then to tensor
+#         ground_truth_array = sitk.GetArrayFromImage(ground_truth_image)
+#         ground_truth_tensor = torch.from_numpy(ground_truth_array, dtype=torch.float32).unsqueeze(0)  # Add channel dimension
         
-        return torch.from_numpy(binary_array, dtype=torch.float32).unsqueeze(0), ground_truth_tensor
+#         return torch.from_numpy(binary_array, dtype=torch.float32).unsqueeze(0), ground_truth_tensor
