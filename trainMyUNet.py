@@ -57,7 +57,7 @@ def setupTrainer(plansJSONPath: str,
     trainer.network = model
 
     # change optimizer and scheduler
-    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-2)
+    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
 
     num_training_steps = trainer.num_epochs           # scheduler steps every epoch, not every batch
     num_warmup_steps = int(0.2 * num_training_steps)  # 20% warmup
@@ -174,8 +174,8 @@ if __name__ == "__main__":
     writer = SummaryWriter()
     datasetName = "Dataset104_cropped_3ch_breast"
     basepath = rf"{os.environ["nnUNet_preprocessed"]}/{datasetName}"
-    pretrainedModelPath = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_4/checkpoint_final.pth"
-    plansPath = rf"{basepath}/nnUNetPlans.json"
+    pretrainedModelPath = "nnunet_pretrained_weights_64_final.pth"
+    plansPath = rf"{basepath}/nnUNetPlans128.json"
     datasetPath = rf"{basepath}/dataset.json"
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -186,7 +186,7 @@ if __name__ == "__main__":
                            datasetPath, 
                            device, 
                            pretrainedModelPath, 
-                           tag="_transformer_again")
+                           tag="_transformer")
     state_dict_path = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}_transformer/checkpoint_final_myUNet.pth"
     train(trainer)
     inference(trainer, state_dict_path)

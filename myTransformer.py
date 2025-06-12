@@ -24,7 +24,7 @@ def subpatchTensor(x: torch.Tensor, subpatchSize: int):
 def unpatchTensor(x: torch.Tensor, numSubpatches: int):
     assert len(x.shape) == 5, f"Expected shape (B*N, C, P, P, P). Got {x.shape}"
     B_N, C, P, _, _ = x.shape
-    numSubpatchesPerDim = int(numSubpatches ** (1/3))
+    numSubpatchesPerDim = round(numSubpatches ** (1/3))
     X = Y = Z = P * numSubpatchesPerDim
 
     B = B_N // numSubpatches
@@ -81,8 +81,8 @@ class MyTransformer(nn.Module):
         channels,
         strides,
         in_channels=2,
-        transformer_depth=4,
-        num_heads=8,
+        transformer_depth=6,
+        num_heads=10,
     ):
         super().__init__()
 
@@ -117,7 +117,8 @@ class MyTransformer(nn.Module):
             d_model=self.emb_dim + nMetadataOutFeatures,
             nhead=num_heads,
             dim_feedforward=(self.emb_dim + nMetadataOutFeatures) * 4,
-            batch_first=True
+            batch_first=True,
+            dropout=0.2
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_depth)
 
@@ -154,7 +155,7 @@ class MyTransformer(nn.Module):
         # print("X dist:", x.mean(), "+/-", x.std())
         P = x.shape[-1]
         # Embed patches
-        subpatchSize = P // 2       # split each patch into 8 subpatches
+        subpatchSize = P // 4       # split each patch into 64 subpatches
         # print("Input x grad:", x.requires_grad)
         x, nSubPatches = subpatchTensor(x, subpatchSize)
         # print("Subpatched x grad:", x.grad_fn, " - nSubPatches:", nSubPatches)
@@ -200,7 +201,7 @@ if __name__ == "__main__":
     b = 2
     # imgname = r"./allTheData/HeatmapsAugmented/Training/00014_Image0.zarr"
     t = torch.rand((b, ch, p, p, p))
-    subpatches, n = subpatchTensor(t, 64)
+    subpatches, n = subpatchTensor(t, 32)
     print(subpatches.shape)
     x, y, z = subpatches.shape[-3:]
     unpatched = unpatchTensor(subpatches.view(b*n, ch, x, y, z), n)
