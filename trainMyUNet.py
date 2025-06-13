@@ -174,7 +174,7 @@ if __name__ == "__main__":
     trainer = setupTrainer(plansPath, "3d_fullres", fold, datasetPath, device, pretrainedModelPath)
     # state_dict_path = r"nnUNet_results\Dataset104_cropped_3ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4\checkpoint_final.pth"
     state_dict_path = r"checkpoint_latest_myUNet.pth"
-    # train(trainer)
+    train(trainer)
     inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")
     # inference(trainer, state_dict_path, inputFolder)
     refine(trainer, state_dict_path)

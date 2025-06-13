@@ -16,8 +16,7 @@ def setupTrainer(plansJSONPath: str,
                  config: str, 
                  fold: int, 
                  datasetJSONPath: str, 
-                 device: torch.device,
-                 transformer: bool = True):
+                 device: torch.device):
     
     with open(plansJSONPath, 'r', encoding="utf-8") as fp:
         plans = json.load(fp)
@@ -27,20 +26,18 @@ def setupTrainer(plansJSONPath: str,
 
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device)
     trainer.weight_bd = 0
+    trainer.num_iterations_per_epoch = 1000
+    trainer.num_val_iterations_per_epoch = 400
+    trainer.num_epochs = 2000
+    trainer.enable_deep_supervision = False
     trainer.initialize()
 
-    if not transformer:
-        return trainer
-
-    model = MyRefiner()
+    model = MyRefiner().to(device)
     trainer.network = model
     trainer.oversample_foreground_percent = 0.8
 
     # change optimizer and scheduler
     trainer.optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-    # num_training_steps = trainer.num_epochs           # scheduler steps every epoch
-    # num_warmup_steps = int(0.2 * num_training_steps)  # 20% warmup
 
     trainer.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         trainer.optimizer,
@@ -152,17 +149,14 @@ def postProcess(segmentationPath: str):
 
 if __name__ == "__main__":
     writer = SummaryWriter()
-    datasetName = "Dataset0_corrupted_preds"
+    datasetName = "Dataset666_corrupted_preds"
     basepath = rf"{os.environ["nnUNet_preprocessed"]}\{datasetName}"
-    # pretrainedModelPath = rf"{os.environ["nnUNet_results"]}\Dataset103_cropped_breast\nnUNetTrainer__nnUNetPlans_64patch__3d_fullres\fold_4\checkpoint_final.pth"
-    pretrainedModelPath = None
     plansPath = rf"{basepath}\nnUNetPlans.json"
     datasetPath = rf"{basepath}\dataset.json"
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     fold = 4
-    trainer = setupTrainer(plansPath, "3d_fullres", fold, datasetPath, device, pretrainedModelPath)
-    # state_dict_path = r"nnUNet_results\Dataset104_cropped_3ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4\checkpoint_final.pth"
+    trainer = setupTrainer(plansPath, "3d_fullres", fold, datasetPath, device)
     state_dict_path = os.path.join(trainer.output_folder, "checkpoint_final_myRefiner.pth")
     train(trainer)
     inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")

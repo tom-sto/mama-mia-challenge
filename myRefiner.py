@@ -1,10 +1,6 @@
 import torch
 import torch.nn as nn
 import numpy as np
-import SimpleITK as sitk
-import os
-from torch.utils.data import DataLoader
-from corruptor import ReadBinaryArrayFromFile
 
 # copied architecture from segmentation autoencoder (Tiramisu 2.0)
 class MyRefiner(torch.nn.Module):
@@ -21,7 +17,6 @@ class MyRefiner(torch.nn.Module):
         bottleneckSteps = nn.ModuleList([])
         decoderSteps    = nn.ModuleList([])
 
-        # learnable threshold for final reconstruction of binary segmentation from logits
         num_blocks = len(down_channels) - 1
 
         # Populate the encoder and decoder modules symmetrically (Order is important here!)
@@ -65,6 +60,7 @@ class MyRefiner(torch.nn.Module):
         self.bottleneck = bottleneckSteps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.to(torch.float32)
         for layer in self.encoder:
             x = layer(x)
 
@@ -82,27 +78,3 @@ class MyRefiner(torch.nn.Module):
         soft_mask = torch.sigmoid(100 * (x - self.threshold))
 
         return soft_mask
-    
-# # make a dataloader that takes a filename, reads the binary array from file, and gets the ground truth from E:\MAMA-MIA\segmentations\expert
-# class MyRefinerDataset(torch.utils.data.Dataset):
-#     def __init__(self, file_paths: list[str], ground_truth_dir: str):
-#         self.file_paths = file_paths
-#         self.ground_truth_dir = ground_truth_dir
-
-#     def __len__(self):
-#         return len(self.file_paths)
-
-#     def __getitem__(self, idx: int):
-#         file_path = self.file_paths[idx]
-#         binary_array = ReadBinaryArrayFromFile(file_path)
-        
-#         # Get the patient ID from the file name
-#         patient_id = file_path.split('/')[-1].split('.')[0][:-2]    # remove the augmentation id
-#         ground_truth_path = f"{self.ground_truth_dir}/{patient_id}.nii.gz"
-#         ground_truth_image = sitk.ReadImage(ground_truth_path)
-        
-#         # Convert SimpleITK image to numpy array and then to tensor
-#         ground_truth_array = sitk.GetArrayFromImage(ground_truth_image)
-#         ground_truth_tensor = torch.from_numpy(ground_truth_array, dtype=torch.float32).unsqueeze(0)  # Add channel dimension
-        
-#         return torch.from_numpy(binary_array, dtype=torch.float32).unsqueeze(0), ground_truth_tensor

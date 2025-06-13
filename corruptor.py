@@ -3,6 +3,7 @@ import numpy as np
 # from scipy.ndimage import binary_dilation
 from skimage.morphology import *
 import os
+from edt import edt
 # import sys
 # sys.path.append('./MAMAMIA')
 # from MAMAMIA.src.visualization import *
@@ -61,17 +62,32 @@ def corruptSegmentations(inputDir = './segDataRaw', outputDir=r'E:\MAMA-MIA\nnUN
         for imgName in os.listdir(dir):
             imgPath = os.path.join(dir, imgName)
             patientID = imgName.split('.')[0]
+
+            if os.path.exists(os.path.join(outputDir, d, patientID + f"_0_0000.nii.gz")):
+                print(f"Skipping {patientID}...", end="\r")
+                continue
+
             img = sitk.ReadImage(imgPath)
             origin, spacing, direction = img.GetOrigin(), img.GetSpacing(), img.GetDirection()
             arr = sitk.GetArrayFromImage(img)
 
             if np.all(arr == 0):
-                zeros = np.zeros_like(arr)
-                outArrs = [zeros, zeros, zeros, zeros]
+                ones = np.ones_like(arr).astype(np.float32) * -1000.
+                outArrs = [ones, ones, ones, ones]
                 for i, array in enumerate(outArrs):
                     WriteBinaryArrayToFile(array, os.path.join(outputDir, d, patientID + f"_{i}_0000"), origin, spacing, direction)
                 print()
-                print(f"{patientID} had no foreground in this prediction, writing all zeros for augmentations.")
+                print(f"{patientID} had no foreground in this prediction, writing all -1000 for augmentations.")
+                print(f"Finished corrupting {imgPath}")
+                continue
+
+            if np.all(arr == 1):
+                ones = np.ones_like(arr).astype(np.float32) * 1000.
+                outArrs = [ones, ones, ones, ones]
+                for i, array in enumerate(outArrs):
+                    WriteBinaryArrayToFile(array, os.path.join(outputDir, d, patientID + f"_{i}_0000"), origin, spacing, direction)
+                print()
+                print(f"{patientID} had no background in this prediction, writing all 1000 for augmentations.")
                 print(f"Finished corrupting {imgPath}")
                 continue
 
@@ -136,7 +152,10 @@ def corruptSegmentations(inputDir = './segDataRaw', outputDir=r'E:\MAMA-MIA\nnUN
             outArrs = [arr, dilation_arr, erosion_arr, both_arr]
 
             for i, array in enumerate(outArrs):
-                WriteBinaryArrayToFile(array, os.path.join(outputDir, d, patientID + f"_{i}_0000"), origin, spacing, direction)
+                dist = edt(array)
+                inv = edt(1 - array)
+                edtArr = dist - inv     # THIS ONE HAS POSITIVE VALUES INSIDE FOREGROUND, NEGATIVE OUTSIDE
+                WriteBinaryArrayToFile(edtArr, os.path.join(outputDir, d, patientID + f"_{i}_0000"), origin, spacing, direction)
 
             print(f"Finished corrupting {imgPath}", end='\r')
 
