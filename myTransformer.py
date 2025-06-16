@@ -104,12 +104,8 @@ class MyTransformer(nn.Module):
 
         self.patch_embed = DeepPatchEmbed3D(channels, in_channels, strides)
         self.pos_embed = nn.Parameter(torch.randn((self.emb_dim,)), requires_grad=True)  # learnable position embedding
-<<<<<<< HEAD
-        
-=======
         self.skip_weights = nn.Parameter(torch.ones(len(self.patch_embed.decoder)) * 0.5, requires_grad=True)  # learnable skip connection weights
 
->>>>>>> 724ecfec387c1a88dc1bacf6c34f505b9fcba59a
         nMetadataInFeatures = 7             # 1 for age (linear), 2 for menopausal status (one-hot), 4 for breast density (one-hot)
         nMetadataOutFeatures = num_heads    # needs to be divisible by num_heads
         self.metadataEmbed = nn.Linear(nMetadataInFeatures, nMetadataOutFeatures)
@@ -131,12 +127,8 @@ class MyTransformer(nn.Module):
             d_model=self.emb_dim + nMetadataOutFeatures,
             nhead=num_heads,
             dim_feedforward=(self.emb_dim + nMetadataOutFeatures) * 4,
-<<<<<<< HEAD
-            batch_first=True
-=======
             batch_first=True,
             dropout=0.2
->>>>>>> 724ecfec387c1a88dc1bacf6c34f505b9fcba59a
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_depth)
 
