@@ -74,6 +74,6 @@ def doUncropping(inpDir: str):
         sitk.WriteImage(uncroppedImg, os.path.join(uncroppedDir, f'{patientID}.nii.gz'))
 
 if __name__ == "__main__":
-    inpDir = "./outputs-transformer-64"
-    # doUncropping(inpDir)
+    inpDir = "./outputs-transformer-128"
+    doUncropping(inpDir)
     generate_scores(inpDir)

@@ -6,4 +6,5 @@ outputs*
 nnUNet_results
 runs
 notebooks
+segData*
 *.pth

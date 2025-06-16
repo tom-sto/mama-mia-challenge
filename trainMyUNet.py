@@ -178,9 +178,10 @@ if __name__ == "__main__":
     plansPath = rf"{basepath}/nnUNetPlans.json"
     datasetPath = rf"{basepath}/dataset.json"
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_big_patch"
+    tag = "_transformer_128_skips"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
@@ -189,5 +190,5 @@ if __name__ == "__main__":
                            pretrainedModelPath, 
                            tag=tag)
     state_dict_path = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}/checkpoint_best_myUNet.pth"
-    # train(trainer)
-    inference(trainer, state_dict_path, outputPath=rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}/pred_segmentations")
+    train(trainer)
+    # inference(trainer, state_dict_path, outputPath=rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}/pred_segmentations_cropped")
