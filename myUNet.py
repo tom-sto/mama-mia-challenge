@@ -1,38 +1,6 @@
 import torch
-import numpy as np
-import json
-import importlib
-import os
 from dynamic_network_architectures.architectures.unet import PlainConvUNet
-
 from myTransformer import MyTransformer
-
-def resolve_string_to_class(path: str):
-    """Convert a string like 'torch.nn.Conv3d' to the actual class."""
-    try:
-        if not isinstance(path, str):
-            return path
-        # Basic heuristic: must have at least one dot and no spaces
-        if 'torch' not in path:
-            return path
-        module_path, class_name = path.rsplit('.', 1)
-        module = importlib.import_module(module_path)
-        return getattr(module, class_name)
-    except (ImportError, AttributeError):
-        # If it fails, return the original string
-        print(f"Could not resolve {path}. Returning as string.")
-        return path
-
-def resolve_modules_in_dict(d: dict):
-    """Recursively convert all string paths to module classes/functions."""
-    if isinstance(d, dict):
-        return {k: resolve_modules_in_dict(v) for k, v in d.items()}
-    elif isinstance(d, list):
-        return [resolve_modules_in_dict(i) for i in d]
-    elif isinstance(d, tuple):
-        return tuple(resolve_modules_in_dict(i) for i in d)
-    else:
-        return resolve_string_to_class(d)
 
 class myUNet(torch.nn.Module):
     def __init__(self, 
@@ -56,8 +24,8 @@ class myUNet(torch.nn.Module):
         self.encoder = MyTransformer(expectedChannels, expectedStride, inChannels)
         self.decoder = pretrainedModelArch.decoder
 
-    def forward(self, x: torch.Tensor):
-        x, skips = self.encoder(x)
+    def forward(self, x: torch.Tensor, metadata: list = None):
+        x, skips = self.encoder(x, metadata)
         skips[-1] = x
         x = self.decoder(skips)
 
