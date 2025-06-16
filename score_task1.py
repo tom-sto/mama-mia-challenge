@@ -64,16 +64,16 @@ def doUncropping(inpDir: str):
         if not imgName.endswith('.nii.gz'):
             continue
         patientID = imgName.split('.')[0]
-        patientInfoPath = os.path.join(r'D:\MAMA-MIA\patient_info_files', f'{patientID}.json')
+        patientInfoPath = os.path.join('/mnt/storageSSD/MAMA-MIA/data/patient_info_files', f'{patientID}.json')
         with open(patientInfoPath, 'r') as f:
             patientInfo = json.load(f)
         imgPath = os.path.join(croppedDir, imgName)
-        ogImgPath = os.path.join(r'D:\MAMA-MIA\images', patientID.upper(), f'{patientID}_0000.nii.gz')
+        ogImgPath = os.path.join('/mnt/storageSSD/MAMA-MIA/data/images', patientID.upper(), f'{patientID}_0000.nii.gz')
         getBoundingBox(ogImgPath, patientID, patientInfo)
         uncroppedImg = uncropToOriginalCoords(imgPath, patientID)
         sitk.WriteImage(uncroppedImg, os.path.join(uncroppedDir, f'{patientID}.nii.gz'))
 
 if __name__ == "__main__":
-    inpDir = "./outputs-latest-128"
-    doUncropping(inpDir)
+    inpDir = "./outputs-transformer-64"
+    # doUncropping(inpDir)
     generate_scores(inpDir)

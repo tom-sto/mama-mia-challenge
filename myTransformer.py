@@ -155,7 +155,7 @@ class MyTransformer(nn.Module):
         # print("X dist:", x.mean(), "+/-", x.std())
         P = x.shape[-1]
         # Embed patches
-        subpatchSize = P // 4       # split each patch into 64 subpatches
+        subpatchSize = P // 2       # split each patch into 64 subpatches
         # print("Input x grad:", x.requires_grad)
         x, nSubPatches = subpatchTensor(x, subpatchSize)
         # print("Subpatched x grad:", x.grad_fn, " - nSubPatches:", nSubPatches)
@@ -168,6 +168,10 @@ class MyTransformer(nn.Module):
         # print("Embedded x shape:", x.shape)
 
         metadata_emb = torch.zeros(B, N, self.metadataEmbed.out_features, device=x.device)  # [B, N, nMetadataOutFeatures]
+
+        if metadata is None:
+            metadata = [{'age': None, 'menopausal_status': None, 'breast_density': None} for _ in range(B)]
+
         # print(metadata)
         for idx, md in enumerate(metadata):
             age = md['age']

@@ -50,7 +50,7 @@ def setupTrainer(plansJSONPath: str,
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device, tag)
     trainer.num_iterations_per_epoch = 200
     trainer.num_val_iterations_per_epoch = 50
-    trainer.num_epochs = 2000
+    trainer.num_epochs = 1000
     trainer.initialize()
 
     model = myUNet(trainer.network, nInChannels, expectedChannels, expectedStride, pretrainedModelPath).to(device)
@@ -120,7 +120,7 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
 
 def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = "./outputs"):
     trainer.set_deep_supervision_enabled(False)
-    state_dict = torch.load(state_dict_path, map_location=trainer.device)
+    state_dict = torch.load(state_dict_path, map_location=trainer.device, weights_only=False)['network_weights']
     trainer.network.load_state_dict(state_dict)
     trainer.network.eval()
 
@@ -175,18 +175,19 @@ if __name__ == "__main__":
     datasetName = "Dataset104_cropped_3ch_breast"
     basepath = rf"{os.environ["nnUNet_preprocessed"]}/{datasetName}"
     pretrainedModelPath = "nnunet_pretrained_weights_64_final.pth"
-    plansPath = rf"{basepath}/nnUNetPlans128.json"
+    plansPath = rf"{basepath}/nnUNetPlans.json"
     datasetPath = rf"{basepath}/dataset.json"
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     fold = 4
+    tag = "_transformer_big_patch"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
                            datasetPath, 
                            device, 
                            pretrainedModelPath, 
-                           tag="_transformer")
-    state_dict_path = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}_transformer/checkpoint_final_myUNet.pth"
-    train(trainer)
-    inference(trainer, state_dict_path)
+                           tag=tag)
+    state_dict_path = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}/checkpoint_best_myUNet.pth"
+    # train(trainer)
+    inference(trainer, state_dict_path, outputPath=rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}/pred_segmentations")
