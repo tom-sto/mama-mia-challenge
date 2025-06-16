@@ -28,7 +28,7 @@ def setupTrainer(plansJSONPath: str,
     trainer.weight_bd = 0
     trainer.num_iterations_per_epoch = 1000
     trainer.num_val_iterations_per_epoch = 400
-    trainer.num_epochs = 2000
+    trainer.num_epochs = 400
     trainer.enable_deep_supervision = False
     trainer.initialize()
 
@@ -37,17 +37,18 @@ def setupTrainer(plansJSONPath: str,
     trainer.oversample_foreground_percent = 0.8
 
     # change optimizer and scheduler
-    trainer.optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    trainer.optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
     trainer.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         trainer.optimizer,
         factor=0.9,
-        min_lr=1e-5
+        min_lr=1e-6,
+        mode='max'
     )
     # print loss fn
     print(f"Loss function: {trainer.loss}")
 
-    trainer.disable_checkpointing = True    # we will do this manually
+    # trainer.disable_checkpointing = True    # we will do this manually
 
     return trainer
 
@@ -82,15 +83,10 @@ def train(trainer: nnUNetTrainer, resume: bool = False, checkpoint: str = None):
             for batch_id in range(trainer.num_val_iterations_per_epoch):
                 val_outputs.append(trainer.validation_step(next(trainer.dataloader_val)))
             trainer.on_validation_epoch_end(val_outputs)
-
-        if epoch % trainer.save_every == 0 and trainer.current_epoch != (trainer.num_epochs - 1):
-            trainer.save_checkpoint(os.path.join(trainer.output_folder, 'checkpoint_latest_myRefiner.pth'))
-
-        # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
-        if trainer._best_ema is None or trainer.logger.my_fantastic_logging['ema_fg_dice'][-1] > trainer._best_ema:
-            trainer.save_checkpoint(os.path.join(trainer.output_folder, 'checkpoint_best_myRefiner.pth'))
-            trainer.save_checkpoint(os.path.join(trainer.output_folder, 'checkpoint_latest_myRefiner.pth'))
-
+        
+        # step lr scheduler on ema dice
+        trainer.lr_scheduler.step(trainer.logger.my_fantastic_logging['ema_fg_dice'][-1])
+        
         trainer.on_epoch_end()
     
     trainer.save_checkpoint(os.path.join(trainer.output_folder, "checkpoint_final_myRefiner.pth"))
@@ -115,18 +111,8 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, inputFolder: str, ou
         outputPath
     )
 
-    metrics = compute_metrics_on_folder(os.path.join(trainer.preprocessed_dataset_folder_base, 'gt_segmentations'),
-                                        outputPath,
-                                        os.path.join(outputPath, 'summary.json'),
-                                        trainer.plans_manager.image_reader_writer_class(),
-                                        trainer.dataset_json["file_ending"],
-                                        trainer.label_manager.foreground_regions if trainer.label_manager.has_regions else
-                                        trainer.label_manager.foreground_labels,
-                                        trainer.label_manager.ignore_label)
-    
-    trainer.print_to_log_file("Validation complete", also_print_to_console=True)
-    trainer.print_to_log_file("Mean Validation Dice: ", (metrics['foreground_mean']["Dice"]),
-                              also_print_to_console=True)
+    from score_task1 import generate_scores
+    generate_scores(outputPath)
 
 def postProcess(segmentationPath: str):
     from scipy.ndimage import label, binary_opening, binary_closing, binary_fill_holes
@@ -160,4 +146,5 @@ if __name__ == "__main__":
     state_dict_path = os.path.join(trainer.output_folder, "checkpoint_final_myRefiner.pth")
     train(trainer)
     inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")
-    inference(trainer, state_dict_path, inputFolder)
+    outputFolder = os.path.join(os.environ["nnUNet_results"], "pred_segmentations_cropped")
+    inference(trainer, state_dict_path, inputFolder, outputFolder)
