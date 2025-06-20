@@ -52,10 +52,10 @@ class DeepPatchEmbed3D(nn.Module):
                 nn.Conv3d(channels[i], channels[i], kernel_size=3, padding=1) if i == 0 else nn.Identity(),
                 nn.Conv3d(channels[i], channels[i + 1], kernel_size=3, padding=1),
                 nn.ReLU(inplace=True),
+                nn.Dropout3d(p=0.3) if i == len(channels) - 2 else nn.Identity(),
                 nn.MaxPool3d(kernel_size=3, stride=strides[i], padding=1)
             )
             self.encoder.append(block)
-
         # Create decoder blocks (mirrored but reinitialized)
         for i in reversed(range(len(channels) - 1)):
             block = nn.Sequential(
@@ -89,9 +89,9 @@ class MyTransformer(nn.Module):
         self,
         channels,
         strides,
-        in_channels=2,
+        in_channels,
         transformer_depth=6,    # make this match num layers in decoder for skips: 6
-        num_heads=10,
+        num_heads=16,
     ):
         super().__init__()
 
@@ -104,7 +104,7 @@ class MyTransformer(nn.Module):
 
         self.patch_embed = DeepPatchEmbed3D(channels, in_channels, strides)
         self.pos_embed = nn.Parameter(torch.randn((self.emb_dim,)), requires_grad=True)  # learnable position embedding
-        self.skip_weights = nn.Parameter(torch.ones(len(self.patch_embed.decoder)) * 0.5, requires_grad=True)  # learnable skip connection weights
+        self.skip_weights = nn.Parameter(torch.rand(2, len(self.patch_embed.decoder)), requires_grad=True)  # learnable skip connection weights
 
         nMetadataInFeatures = 7             # 1 for age (linear), 2 for menopausal status (one-hot), 4 for breast density (one-hot)
         nMetadataOutFeatures = num_heads    # needs to be divisible by num_heads
@@ -114,14 +114,14 @@ class MyTransformer(nn.Module):
         ageMax = 77
         self.ageEncode  = lambda x: torch.tensor([(x - ageMin) / (ageMax - ageMin)], dtype=torch.float32) if x is not None \
             else torch.tensor([0.5], dtype=torch.float32)   # normalize age to [0, 1] range, default to 0.5 if None
-        self.menoEncode = lambda x: torch.tensor([1, 0]) if x == "pre" \
-            else torch.tensor([0, 1]) if x == "post" \
-            else torch.tensor([0, 0])
-        self.densityEncode = lambda x: torch.tensor([1, 0, 0, 0]) if x == "a" \
-            else torch.tensor([0, 1, 0, 0]) if x == "b" \
-            else torch.tensor([0, 0, 1, 0]) if x == "c" \
-            else torch.tensor([0, 0, 0, 1]) if x == "d" \
-            else torch.tensor([0, 0, 0, 0])
+        self.menoEncode = lambda x: torch.tensor([1, 0], dtype=torch.float32) if x == "pre" \
+            else torch.tensor([0, 1], dtype=torch.float32) if x == "post" \
+            else torch.tensor([0, 0], dtype=torch.float32)
+        self.densityEncode = lambda x: torch.tensor([1, 0, 0, 0], dtype=torch.float32) if x == "a" \
+            else torch.tensor([0, 1, 0, 0], dtype=torch.float32) if x == "b" \
+            else torch.tensor([0, 0, 1, 0], dtype=torch.float32) if x == "c" \
+            else torch.tensor([0, 0, 0, 1], dtype=torch.float32) if x == "d" \
+            else torch.tensor([0, 0, 0, 0], dtype=torch.float32)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.emb_dim + nMetadataOutFeatures,
@@ -203,10 +203,12 @@ class MyTransformer(nn.Module):
             # print("Layer input grad_fn:", x.grad_fn)
             x = layer(x)
 
-            y: torch.Tensor = self.fc_to_patches(x.clone())
+            y: torch.Tensor = self.fc_to_patches(x)
             y = y.permute(0, 2, 1)  # [B, emb_dim, N]
             y = y.reshape(B, E, p_split, p_split, p_split)
             tf_skips.append(y)
+
+        x = self.fc_to_patches(x)  # [B, N, emb_dim]
 
         tf_skips = tf_skips[::-1]
         for i in range(len(tf_skips)):
@@ -214,13 +216,14 @@ class MyTransformer(nn.Module):
             if i == 0:
                 assert tf_skips[i].shape == expected_shape, f"Skip {i} shape {tf_skips[i].shape} does not match expected shape {expected_shape}"
                 continue
-            tf_skips[i] = self.patch_embed.decoder[i-1](tf_skips[i-1])
+            for j in range(i):
+                tf_skips[i] = self.patch_embed.decoder[j](tf_skips[i])
             assert tf_skips[i].shape == expected_shape, f"Skip {i} shape {tf_skips[i].shape} does not match expected shape {expected_shape}"
 
         tf_skips = tf_skips[::-1]
 
         for i in range(len(skips)):
-            skips[i] = (1 - self.skip_weights[i]) * skips[i] + self.skip_weights[i] * tf_skips[i]
+            skips[i] = self.skip_weights[0][i] * skips[i] + self.skip_weights[1][i] * tf_skips[i]
 
         # reshape to match conv shape
         x = x.reshape(B*N, X, Y, Z, E)

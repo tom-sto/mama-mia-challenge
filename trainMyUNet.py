@@ -65,7 +65,8 @@ def setupTrainer(plansJSONPath: str,
     trainer.lr_scheduler = get_cosine_schedule_with_warmup(
         trainer.optimizer, 
         num_warmup_steps=num_warmup_steps, 
-        num_training_steps=num_training_steps
+        num_training_steps=num_training_steps,
+        num_cycles=5
     )
 
     trainer.disable_checkpointing = True    # we will do this manually
@@ -190,5 +191,5 @@ if __name__ == "__main__":
                            pretrainedModelPath, 
                            tag=tag)
     state_dict_path = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}/checkpoint_best_myUNet.pth"
-    train(trainer)
-    # inference(trainer, state_dict_path, outputPath=rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}/pred_segmentations_cropped")
+    # train(trainer)
+    inference(trainer, state_dict_path, outputPath=rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}/pred_segmentations_cropped")
