@@ -93,15 +93,6 @@ def corruptSegmentations(inputDir = './segDataRaw', outputDir=r'E:\MAMA-MIA\nnUN
                 print(f"Finished corrupting {imgPath}")
                 continue
 
-            # if patientID == "duke_032":
-            #     sitk.WriteImage(sitk.GetImageFromArray(ogArr), "img.mha")
-            #     # ogog = read_segmentation_from_patient_id(r'E:\MAMA-MIA\segmentations\expert', patientID)
-            #     # sitk.WriteImage(ogog, "og.mha")
-            #     print(xmin, ymin, zmin, xmax, ymax, zmax)
-            #     sitk.WriteImage(sitk.GetImageFromArray(cropped_arr), "cropped.mha")
-            
-
-            # img = cropped_image
             dilation_kernel = generateKernel(arr.shape, p=0.008)
             erosion_kernel = generateKernel(arr.shape, p=0.003)
 
