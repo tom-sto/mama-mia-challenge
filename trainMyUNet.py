@@ -100,7 +100,7 @@ def setupTrainer(plansJSONPath: str,
 
     num_training_steps = trainer.num_epochs           # scheduler steps every epoch, not every batch
     num_warmup_steps = round(0.2 * num_training_steps)  # 20% warmup
-    num_cycle_steps = round(0.1 * num_training_steps) + 1
+    num_cycle_steps = round(0.2 * num_training_steps) + 1
 
     trainer.lr_scheduler = WarmupCosineAnnealingWithRestarts(
         trainer.optimizer,
