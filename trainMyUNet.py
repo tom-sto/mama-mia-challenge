@@ -196,7 +196,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_128_skips_fair_no_transpose"
+    tag = "_transformer_128_skips_just_fair"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
