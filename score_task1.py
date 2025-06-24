@@ -5,6 +5,8 @@ from MAMAMIA.src.challenge.scoring_task1 import generate_scores
 
 og_coords = {}
 
+data_dir = os.environ.get("MAMA-MIA")
+
 def getBoundingBox(imagePath: str, patient_id: str, patientInfo: dict):
     assert imagePath.endswith(".nii.gz"), f"Bad image path ending: {imagePath}"
     image = sitk.ReadImage(imagePath)
@@ -64,16 +66,36 @@ def doUncropping(inpDir: str):
         if not imgName.endswith('.nii.gz'):
             continue
         patientID = imgName.split('.')[0]
-        patientInfoPath = os.path.join(r'E:\MAMA-MIA\patient_info_files', f'{patientID}.json')
+        patientInfoPath = os.path.join(f'{data_dir}/patient_info_files', f'{patientID}.json')
         with open(patientInfoPath, 'r') as f:
             patientInfo = json.load(f)
         imgPath = os.path.join(croppedDir, imgName)
-        ogImgPath = os.path.join(r'E:\MAMA-MIA\images', patientID.upper(), f'{patientID}_0000.nii.gz')
+        ogImgPath = os.path.join(f'{data_dir}/images', patientID.upper(), f'{patientID}_0000.nii.gz')
         getBoundingBox(ogImgPath, patientID, patientInfo)
         uncroppedImg = uncropToOriginalCoords(imgPath, patientID)
         sitk.WriteImage(uncroppedImg, os.path.join(uncroppedDir, f'{patientID}.nii.gz'))
 
+def evaluateAcrossDatasets(inpDir: str):
+    import pandas as pd
+
+    # Load your CSV file into a DataFrame
+    df = pd.read_csv(f'{inpDir}/results_task1.csv')
+
+    # Filter and calculate average DSC for each group
+    groups = ["DUKE", "ISPY1", "ISPY2", "NACT"]
+    average_dsc = {}
+
+    for group in groups:
+        # Filter rows where patient_id contains the group and ignore NaN values in DSC
+        group_df = df[df['patient_id'].str.contains(group, na=False)]
+        average_dsc[group] = group_df['DSC'].mean()
+
+    # Print the results
+    for group, avg in average_dsc.items():
+        print(f"Average DSC for {group}: {avg}")
+
 if __name__ == "__main__":
-    inpDir = "./outputs-64patch"
-    # doUncropping(inpDir)
+    inpDir = "./transformer_128_skips_fair"
+    doUncropping(inpDir)
     generate_scores(inpDir)
+    evaluateAcrossDatasets(inpDir)

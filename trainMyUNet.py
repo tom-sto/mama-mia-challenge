@@ -133,42 +133,14 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
     inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")
 
     os.makedirs(outputPath, exist_ok=True)
-    ret = predictor.predict_from_files(
+    ret = predictor.predict_from_files_sequential(
         inputFolder,
         outputPath
     )
 
-    metrics = compute_metrics_on_folder(os.path.join(trainer.preprocessed_dataset_folder_base, 'gt_segmentations'),
-                                        outputPath,
-                                        os.path.join(outputPath, 'summary.json'),
-                                        trainer.plans_manager.image_reader_writer_class(),
-                                        trainer.dataset_json["file_ending"],
-                                        trainer.label_manager.foreground_regions if trainer.label_manager.has_regions else
-                                        trainer.label_manager.foreground_labels,
-                                        trainer.label_manager.ignore_label)
-    
-    trainer.print_to_log_file("Validation complete", also_print_to_console=True)
-    trainer.print_to_log_file("Mean Validation Dice: ", (metrics['foreground_mean']["Dice"]),
-                              also_print_to_console=True)
-
-# def postProcess(segmentationPath: str):
-#     from scipy.ndimage import label, binary_opening, binary_closing, binary_fill_holes
-#     from numpy import ndarray, bincount
-#     def getPrimaryTumor(seg_array: ndarray):
-#         labeled_mask, _ = label(seg_array)
-#         sizes = bincount(labeled_mask.ravel())
-#         sizes[0] = 0  # background
-#         largest_label = sizes.argmax()
-#         primary_tumor = (labeled_mask == largest_label).astype(int)
-#         return primary_tumor
-
-#     for seg in os.listdir(segmentationPath):
-#         segPath = os.path.join(segmentationPath, seg)
-#         segImg = sitk.ReadImage(segPath)
-#         primaryTumorArr = getPrimaryTumor(sitk.GetArrayFromImage(segImg))
-#         primaryTumorImg = sitk.GetImageFromArray(primaryTumorArr)
-#         primaryTumorImg.CopyInformation(segImg)
-#         sitk.WriteImage(primaryTumorImg, segPath)
+    from score_task1 import doUncropping, generate_scores
+    doUncropping(os.path.dirname(outputPath))
+    generate_scores(os.path.dirname(outputPath))
 
 if __name__ == "__main__":
     writer = SummaryWriter()
@@ -180,13 +152,14 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     fold = 4
+    tag = "_transformer_128_skips_fair"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
                            datasetPath, 
                            device, 
                            pretrainedModelPath, 
-                           tag="_transformer")
-    state_dict_path = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}_transformer/checkpoint_final_myUNet.pth"
-    train(trainer)
-    inference(trainer, state_dict_path)
+                           tag=tag)
+    state_dict_path = "./transformer_128_skips_fair/checkpoint_best_myUNet.pth"
+    # train(trainer)
+    inference(trainer, state_dict_path, outputPath="./transformer_128_skips_fair/pred_segmentations_cropped")
