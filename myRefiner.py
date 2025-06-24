@@ -5,9 +5,8 @@ import numpy as np
 # copied architecture from segmentation autoencoder (Tiramisu 2.0)
 class MyRefiner(torch.nn.Module):
     def __init__(self,
-                 dropout_p: float = 0.2,
-                 down_channels: list[int] = [1, 8, 32, 64, 128],
-                 up_channels: list[int] = [2, 8, 32, 64, 128],      # end with 2 channels so nnUNet trainer can do cross-entropy loss
+                 down_channels: list[int] = [3, 8, 32, 64, 96],
+                 up_channels: list[int] = [2, 8, 32, 64, 96],      # end with 2 channels so nnUNet trainer can do cross-entropy loss
                  n_bottleneck_layers: int = 3
     ):
         super(MyRefiner, self).__init__()
@@ -23,7 +22,7 @@ class MyRefiner(torch.nn.Module):
         for i in range(num_blocks):
             # if this is the last block before the latent space, add dropout
             if i == num_blocks - 1:
-                encoderSteps.append(nn.Dropout3d(dropout_p))
+                encoderSteps.append(nn.Dropout3d(0.2))
 
             # Antonio says to put BatchNorm first in each encoder block
             encoderSteps.append(nn.BatchNorm3d(num_features=down_channels[i]))
@@ -33,6 +32,8 @@ class MyRefiner(torch.nn.Module):
                 encoderSteps.append(nn.Conv3d(in_channels=down_channels[i], out_channels=down_channels[i], kernel_size=3, padding=1))
             encoderSteps.append(nn.Conv3d(in_channels=down_channels[i], out_channels=down_channels[i+1], kernel_size=3, padding=1))
             encoderSteps.append(nn.ReLU(True))
+            if i % 2:
+                encoderSteps.append(nn.Dropout3d(0.1))
             encoderSteps.append(nn.MaxPool3d(kernel_size=3, stride=2, padding=1))
             
             # don't run Batch Norm or ReLU on the last decoder block, just send conv output straight to loss fn
@@ -40,6 +41,8 @@ class MyRefiner(torch.nn.Module):
             # we also want to make sure that we don't activate before the loss is calculated
             if i != 0:
                 decoderSteps.insert(0, nn.ReLU(True))   # Note that we are inserting at the front! These get put in reverse order
+                if i % 2:
+                    decoderSteps.insert(0, nn.Dropout3d(0.1))
                 decoderSteps.insert(0, nn.BatchNorm3d(num_features=up_channels[i]))
             decoderSteps.insert(0, nn.Conv3d(in_channels=up_channels[i], out_channels=up_channels[i], kernel_size=3, padding=1))
             decoderSteps.insert(0, nn.ConvTranspose3d(in_channels=up_channels[i+1], 
@@ -74,7 +77,3 @@ class MyRefiner(torch.nn.Module):
             x = layer(x)
         
         return x
-    
-        soft_mask = torch.sigmoid(100 * (x - self.threshold))
-
-        return soft_mask

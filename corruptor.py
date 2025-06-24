@@ -1,16 +1,12 @@
-import SimpleITK as sitk
 import numpy as np
-# from scipy.ndimage import binary_dilation
-from skimage.morphology import *
 import os
-from edt import edt
 # import sys
 # sys.path.append('./MAMAMIA')
 # from MAMAMIA.src.visualization import *
 # from MAMAMIA.src.preprocessing import read_segmentation_from_patient_id
-from trainMyUNet import setupTrainer, inference
 
 def WriteBinaryArrayToFile(arr, filepath, origin, spacing, direction):
+    import SimpleITK as sitk
     img = sitk.GetImageFromArray(arr)
     img.SetOrigin(origin)
     img.SetSpacing(spacing)
@@ -19,6 +15,7 @@ def WriteBinaryArrayToFile(arr, filepath, origin, spacing, direction):
 
 def generateSegmentations():
     import torch
+    from trainMyUNet import setupTrainer, inference
     datasetName = "Dataset104_cropped_3ch_breast"
     basepath = rf"{os.environ["nnUNet_preprocessed"]}\{datasetName}"
     pretrainedModelPath = None
@@ -55,7 +52,12 @@ def generateKernel(shape: tuple[int], p: float = 0.5):
     return kernel
 
 def corruptSegmentations(inputDir = './segDataRaw', outputDir=r'E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds'):
+    import SimpleITK as sitk
+    from skimage.morphology import ball
+    from scipy.ndimage import binary_dilation
+    from edt import edt
     dirs = ["training", "validation", "testing"]
+    dirs = []
     for d in dirs:
         os.makedirs(os.path.join(outputDir, d), exist_ok=True)
         dir = os.path.join(inputDir, d)
@@ -72,22 +74,22 @@ def corruptSegmentations(inputDir = './segDataRaw', outputDir=r'E:\MAMA-MIA\nnUN
             arr = sitk.GetArrayFromImage(img)
 
             if np.all(arr == 0):
-                ones = np.ones_like(arr).astype(np.float32) * -1000.
+                ones = np.ones_like(arr).astype(np.float32) * -1.
                 outArrs = [ones, ones, ones, ones]
                 for i, array in enumerate(outArrs):
                     WriteBinaryArrayToFile(array, os.path.join(outputDir, d, patientID + f"_{i}_0000"), origin, spacing, direction)
                 print()
-                print(f"{patientID} had no foreground in this prediction, writing all -1000 for augmentations.")
+                print(f"{patientID} had no foreground in this prediction, writing all -1 for augmentations.")
                 print(f"Finished corrupting {imgPath}")
                 continue
 
             if np.all(arr == 1):
-                ones = np.ones_like(arr).astype(np.float32) * 1000.
+                ones = np.ones_like(arr).astype(np.float32) * 1.
                 outArrs = [ones, ones, ones, ones]
                 for i, array in enumerate(outArrs):
                     WriteBinaryArrayToFile(array, os.path.join(outputDir, d, patientID + f"_{i}_0000"), origin, spacing, direction)
                 print()
-                print(f"{patientID} had no background in this prediction, writing all 1000 for augmentations.")
+                print(f"{patientID} had no background in this prediction, writing all 1 for augmentations.")
                 print(f"Finished corrupting {imgPath}")
                 continue
 
@@ -155,23 +157,40 @@ def corruptSegmentations(inputDir = './segDataRaw', outputDir=r'E:\MAMA-MIA\nnUN
                 dist = edt(array)
                 inv = edt(1 - array)
                 edtArr = dist - inv     # THIS ONE HAS POSITIVE VALUES INSIDE FOREGROUND, NEGATIVE OUTSIDE
-                WriteBinaryArrayToFile(edtArr, os.path.join(outputDir, d, patientID + f"_{i}_0000"), origin, spacing, direction)
+                absMax = np.max(np.abs(edtArr))
+                normArr = edtArr / absMax
+                WriteBinaryArrayToFile(normArr, os.path.join(outputDir, d, patientID + f"_{i}_0000"), origin, spacing, direction)
 
             print(f"Finished corrupting {imgPath}", end='\r')
 
-    # print("Doing bullshi")
-    # import shutil
     # for file in os.listdir(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\imagesTr"):
+    #     if not file.endswith("0000.nii.gz"):
+    #         continue
     #     src = os.path.join(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\imagesTr", file)
-    #     dst = file.split('.')[0] + '_0000.nii.gz'
-    #     dst = os.path.join(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\imagesTr", dst)
-    #     shutil.move(src, dst)
+    #     img = sitk.ReadImage(src)
+    #     arr = sitk.GetArrayFromImage(img)
+    #     absMax = np.max(np.abs(arr))
+    #     normArr = arr / absMax
+    #     newImg = sitk.GetImageFromArray(normArr)
+    #     newImg.CopyInformation(img)
+    #     sitk.WriteImage(newImg, src)
+    #     print(f"Normalized {file}", end='\r')
 
+    # print("Done with training")
     # for file in os.listdir(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\imagesTs"):
+    #     if not file.endswith("0000.nii.gz"):
+    #         continue
     #     src = os.path.join(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\imagesTs", file)
-    #     dst = file.split('.')[0] + '_0000.nii.gz'
-    #     dst = os.path.join(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\imagesTs", dst)
-    #     shutil.move(src, dst)
+    #     img = sitk.ReadImage(src)
+    #     arr = sitk.GetArrayFromImage(img)
+    #     absMax = np.max(np.abs(arr))
+    #     normArr = arr / absMax
+    #     newImg = sitk.GetImageFromArray(normArr)
+    #     newImg.CopyInformation(img)
+    #     sitk.WriteImage(newImg, src)
+    #     print(f"Normalized {file}", end='\r')
+    
+    # print("Done with testing")
 
     # for file in os.listdir(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\labelsTr"):
     #     src = os.path.join(r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds\labelsTr", file)
@@ -182,10 +201,34 @@ def corruptSegmentations(inputDir = './segDataRaw', outputDir=r'E:\MAMA-MIA\nnUN
 
     #     os.remove(src)
 
+def getMRIs(mriDir: str = r"E:\MAMA-MIA\nnUNet_raw\Dataset104_cropped_3ch_breast", 
+            corruptedDir: str = r"E:\MAMA-MIA\nnUNet_raw\Dataset666_corrupted_preds"):
+    import shutil
+    dirs = ["imagesTr", "imagesTs", "labelsTr"]
+    # grab first MRI and put it as second channel
+
+    for d in dirs:
+        imgDir = os.path.join(mriDir, d)
+        for imgName in os.listdir(imgDir):
+            if not imgName.endswith("0001.nii.gz"):
+                continue
+            imgPath = os.path.join(imgDir, imgName)
+            ogImgFirstPart = imgName[:-11]
+            for imgSecondPart in [f"{i}_0002.nii.gz" for i in range(4)]:
+                newImgName = ogImgFirstPart + imgSecondPart
+                newImgPath = os.path.join(corruptedDir, d, newImgName)
+                
+                shutil.copy(imgPath, newImgPath)
+
+            print(f"Finished copying {imgPath} to {newImgPath}", end='\r')
+
+    print()
+    print("Done!")
 
 def main():
     # generateSegmentations()
     corruptSegmentations()
+    getMRIs()
     
 
 if __name__ == "__main__":

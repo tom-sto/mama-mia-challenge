@@ -6,6 +6,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from MAMAMIA.nnUNet.nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from MAMAMIA.nnUNet.nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+from MAMAMIA.nnUNet.nnunetv2.training.lr_scheduler.polylr import PolyLRScheduler
 from MAMAMIA.nnUNet.nnunetv2.evaluation.evaluate_predictions import compute_metrics_on_folder
 
 from myRefiner import MyRefiner
@@ -16,7 +17,8 @@ def setupTrainer(plansJSONPath: str,
                  config: str, 
                  fold: int, 
                  datasetJSONPath: str, 
-                 device: torch.device):
+                 device: torch.device,
+                 tag=""):
     
     with open(plansJSONPath, 'r', encoding="utf-8") as fp:
         plans = json.load(fp)
@@ -24,12 +26,13 @@ def setupTrainer(plansJSONPath: str,
     with open(datasetJSONPath, 'r', encoding="utf-8") as fp:
         datasetInfo: dict = json.load(fp)
 
-    trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device)
+    trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device, tag)
     trainer.weight_bd = 0
     trainer.num_iterations_per_epoch = 1000
     trainer.num_val_iterations_per_epoch = 400
-    trainer.num_epochs = 400
+    trainer.num_epochs = 800
     trainer.enable_deep_supervision = False
+    trainer.initial_lr = 5e-5
     trainer.initialize()
 
     model = MyRefiner().to(device)
@@ -37,14 +40,9 @@ def setupTrainer(plansJSONPath: str,
     trainer.oversample_foreground_percent = 0.8
 
     # change optimizer and scheduler
-    trainer.optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.initial_lr, weight_decay=1e-5)
+    trainer.lr_scheduler = PolyLRScheduler(trainer.optimizer, trainer.initial_lr, trainer.num_epochs)
 
-    trainer.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        trainer.optimizer,
-        factor=0.9,
-        min_lr=1e-6,
-        mode='max'
-    )
     # print loss fn
     print(f"Loss function: {trainer.loss}")
 
@@ -84,9 +82,6 @@ def train(trainer: nnUNetTrainer, resume: bool = False, checkpoint: str = None):
                 val_outputs.append(trainer.validation_step(next(trainer.dataloader_val)))
             trainer.on_validation_epoch_end(val_outputs)
         
-        # step lr scheduler on ema dice
-        trainer.lr_scheduler.step(trainer.logger.my_fantastic_logging['ema_fg_dice'][-1])
-        
         trainer.on_epoch_end()
     
     trainer.save_checkpoint(os.path.join(trainer.output_folder, "checkpoint_final_myRefiner.pth"))
@@ -111,8 +106,10 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, inputFolder: str, ou
         outputPath
     )
 
-    from score_task1 import generate_scores
-    generate_scores(outputPath)
+    forCorrupted = 'Dataset666_corrupted_preds' in outputPath
+
+    from score_task1 import doScoring
+    doScoring(os.path.dirname(outputPath), forCorrupted)
 
 def postProcess(segmentationPath: str):
     from scipy.ndimage import label, binary_opening, binary_closing, binary_fill_holes
@@ -142,9 +139,15 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     fold = 4
-    trainer = setupTrainer(plansPath, "3d_fullres", fold, datasetPath, device)
-    state_dict_path = os.path.join(trainer.output_folder, "checkpoint_final_myRefiner.pth")
+    tag = "_with_mri_64"
+    trainer = setupTrainer(plansPath, "3d_fullres", fold, datasetPath, device, tag)
+    state_dict_path = os.path.join(trainer.output_folder, "checkpoint_final.pth")
     train(trainer)
     inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")
-    outputFolder = os.path.join(os.environ["nnUNet_results"], "pred_segmentations_cropped")
+    outputFolder = os.path.join(os.environ["nnUNet_results"], 
+                                datasetName, 
+                                "nnUNetTrainer__nnUNetPlans__3d_fullres", 
+                                f"fold_{fold}{tag}", 
+                                "results",
+                                "pred_segmentations_cropped")
     inference(trainer, state_dict_path, inputFolder, outputFolder)

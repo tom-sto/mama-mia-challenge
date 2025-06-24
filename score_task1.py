@@ -56,22 +56,28 @@ def uncropToOriginalCoords(cropped_image_path: str, patient_id: str):
 
     return uncropped_image
 
-def doUncropping(inpDir: str):
+def doUncropping(inpDir: str, forCorrupted: bool = False):
     croppedDir = os.path.join(inpDir, 'pred_segmentations_cropped')
     uncroppedDir = os.path.join(inpDir, 'pred_segmentations')
     os.makedirs(uncroppedDir, exist_ok=True)
     for imgName in os.listdir(croppedDir):
         if not imgName.endswith('.nii.gz'):
             continue
-        patientID = imgName.split('.')[0]
-        patientInfoPath = os.path.join('/mnt/storageSSD/MAMA-MIA/data/patient_info_files', f'{patientID}.json')
+        patientID = imgName.split('.')[0]      
+        if forCorrupted:
+            patientID = patientID[:-2]
+        patientInfoPath = os.path.join(r'E:\MAMA-MIA\patient_info_files', f'{patientID}.json')
         with open(patientInfoPath, 'r') as f:
             patientInfo = json.load(f)
         imgPath = os.path.join(croppedDir, imgName)
-        ogImgPath = os.path.join('/mnt/storageSSD/MAMA-MIA/data/images', patientID.upper(), f'{patientID}_0000.nii.gz')
+        ogImgPath = os.path.join(r'E:\MAMA-MIA\images', patientID.upper(), f'{patientID}_0000.nii.gz')
         getBoundingBox(ogImgPath, patientID, patientInfo)
         uncroppedImg = uncropToOriginalCoords(imgPath, patientID)
-        sitk.WriteImage(uncroppedImg, os.path.join(uncroppedDir, f'{patientID}.nii.gz'))
+        sitk.WriteImage(uncroppedImg, os.path.join(uncroppedDir, imgName))
+
+def doScoring(inputDir, forCorrupted: bool = False):
+    doUncropping(inputDir, forCorrupted)
+    generate_scores(inputDir, forCorrupted)
 
 if __name__ == "__main__":
     inpDir = "./outputs-transformer-128"
