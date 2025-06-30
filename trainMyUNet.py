@@ -2,16 +2,49 @@ import torch
 import json
 import os
 import math
+from typing import Union
 # import SimpleITK as sitk
 # from transformers import get_cosine_schedule_with_warmup
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import _LRScheduler
 from MAMAMIA.nnUNet.nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from MAMAMIA.nnUNet.nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-from MAMAMIA.nnUNet.nnunetv2.evaluation.evaluate_predictions import compute_metrics_on_folder
 from myUNet import myUNet
 
 writer = None
+
+class PCRLoss(torch.nn.Module):
+    def __init__(self, alpha=0.5, beta=0.5):
+        """
+        alpha and beta are weighting terms in case you want to combine BCE with another loss
+        for example: total_loss = alpha * BCE + beta * focal or another auxiliary term.
+        """
+        super(PCRLoss, self).__init__()
+        self.alpha = alpha
+        self.beta = beta  # currently unused, but kept for extension
+        self.bce = torch.nn.BCEWithLogitsLoss()  # handles sigmoid internally
+
+    def forward(self, logits: torch.Tensor, targets: Union[list[int], torch.Tensor]):
+        """
+        Args:
+            logits: (B,) or (B, 1) raw model outputs (before sigmoid)
+            targets: list of ints (0 or 1), or a torch.Tensor of shape (B,)
+        """
+        # Convert list to tensor if needed
+        if isinstance(targets, list):
+            targets = torch.tensor(targets, dtype=torch.float32, device=logits.device)
+
+        # Ensure logits and targets match in shape
+        if logits.ndim == 2 and logits.shape[1] == 1:
+            logits = logits.squeeze(1)  # shape (B,)
+
+        # Filter out entries where targets are -1
+        mask = targets != -1
+        logits = logits[mask]
+        targets = targets[mask]
+        loss = self.alpha * self.bce(logits, targets)
+
+        return loss
 
 class WarmupCosineAnnealingWithRestarts(_LRScheduler):
     def __init__(self, optimizer, warmup_steps, cycle_steps, cycle_mult=1.0, max_lr=1e-3, min_lr=1e-5, damping=1.0, last_epoch=-1):
@@ -108,8 +141,10 @@ def setupTrainer(plansJSONPath: str,
         cycle_steps=num_cycle_steps,
         max_lr=trainer.initial_lr,
         min_lr=1e-10,
-        damping=0.85
+        damping=0.8
     )
+
+    trainer.cls_loss = PCRLoss()
 
     trainer.disable_checkpointing = True    # we will do this manually
 
@@ -122,6 +157,9 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
     else:
         trainer.current_epoch = 0
     trainer.on_train_start()
+
+    cls_losses = []
+    import matplotlib.pyplot as plt
 
     for epoch in range(trainer.current_epoch, trainer.num_epochs):
         trainer.on_epoch_start()
@@ -144,8 +182,13 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
         with torch.no_grad():
             trainer.on_validation_epoch_start()
             val_outputs = []
+            cls_losses_avg = []
             for batch_id in range(trainer.num_val_iterations_per_epoch):
-                val_outputs.append(trainer.validation_step(next(trainer.dataloader_val)))
+                val_out, cls_loss = trainer.validation_step(next(trainer.dataloader_val))
+                val_outputs.append(val_out)
+                cls_losses_avg.append(cls_loss.item())
+
+            cls_losses.append(sum(cls_losses_avg) / len(cls_losses_avg))
             trainer.on_validation_epoch_end(val_outputs)
 
         if epoch % trainer.save_every == 0 and trainer.current_epoch != (trainer.num_epochs - 1):
@@ -157,6 +200,13 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
             saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_latest_myUNet.pth'))
 
         trainer.on_epoch_end()
+
+        plt.plot(cls_losses, label='Classification Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Classification Loss Over Epochs')
+        plt.savefig(os.path.join(trainer.output_folder, 'classification_loss.png'))
+        plt.clf()
     
     saveModel(trainer, os.path.join(trainer.output_folder, "checkpoint_final_myUNet.pth"))
     trainer.on_train_end()
@@ -166,6 +216,7 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
     state_dict = torch.load(state_dict_path, map_location=trainer.device, weights_only=False)['network_weights']
     trainer.network.load_state_dict(state_dict)
     trainer.network.eval()
+    trainer.network.ret = "seg"
 
     predictor = nnUNetPredictor(tile_step_size=0.5, use_gaussian=True, use_mirroring=True,
                                 perform_everything_on_device=True, device=trainer.device, verbose=False,
@@ -176,14 +227,18 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
     inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")
 
     os.makedirs(outputPath, exist_ok=True)
-    ret = predictor.predict_from_files_sequential(
+    ret = predictor.predict_from_files(
         inputFolder,
         outputPath
     )
 
-    from score_task1 import doUncropping, generate_scores
-    doUncropping(os.path.dirname(outputPath))
-    generate_scores(os.path.dirname(outputPath))
+    from score_task1 import doScoring
+    doScoring(os.path.dirname(outputPath))
+
+    # do pCR inference
+    trainer.network.ret = "cls"
+    ...
+    
 
 if __name__ == "__main__":
     writer = SummaryWriter()
@@ -196,7 +251,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_128_skips_just_fair"
+    tag = "_transformer_joint"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 

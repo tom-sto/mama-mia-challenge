@@ -84,6 +84,30 @@ class DeepPatchEmbed3D(nn.Module):
 
         return x, skips, (B, N, E, X, Y, Z)
 
+class AttentionPool(nn.Module):
+    def __init__(self, dim, heads=4):
+        super().__init__()
+        self.q = nn.Parameter(torch.randn(1, 1, dim))  # Learnable query token
+        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+
+    def forward(self, x):
+        B = x.size(0)
+        q = self.q.expand(B, -1, -1)  # (B, 1, dim)
+        attn_out, _ = self.attn(q, x, x)  # Attend to transformer tokens
+        return attn_out.squeeze(1)       # (B, dim)
+
+class ClassifierHead(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+
+    def forward(self, x):
+        return self.fc(x)  # (B, num_classes)
+
 class MyTransformer(nn.Module):
     def __init__(
         self,
@@ -203,12 +227,13 @@ class MyTransformer(nn.Module):
             # print("Layer input grad_fn:", x.grad_fn)
             x = layer(x)
 
-            y: torch.Tensor = self.fc_to_patches(x.clone())
+            y: torch.Tensor = self.fc_to_patches(x)
             y = y.permute(0, 2, 1)  # [B, emb_dim, N]
             y = y.reshape(B, E, p_split, p_split, p_split)
             tf_skips.append(y)
 
         x = self.fc_to_patches(x)  # [B, N, emb_dim]
+        tokens = x.clone()
 
         tf_skips = tf_skips[::-1]
         for i in range(len(tf_skips)):
@@ -216,7 +241,8 @@ class MyTransformer(nn.Module):
             if i == 0:
                 assert tf_skips[i].shape == expected_shape, f"Skip {i} shape {tf_skips[i].shape} does not match expected shape {expected_shape}"
                 continue
-            tf_skips[i] = self.patch_embed.decoder[i-1](tf_skips[i-1])
+            for j in range(i):
+                tf_skips[i] = self.patch_embed.decoder[j](tf_skips[i])
             assert tf_skips[i].shape == expected_shape, f"Skip {i} shape {tf_skips[i].shape} does not match expected shape {expected_shape}"
 
         tf_skips = tf_skips[::-1]
@@ -230,7 +256,7 @@ class MyTransformer(nn.Module):
         x = unpatchTensor(x, nSubPatches)
         # print("Final x grad_fn:", x.grad_fn)
 
-        return x, skips
+        return x, skips, tokens
 
 if __name__ == "__main__":
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")

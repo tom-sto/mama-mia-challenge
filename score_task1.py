@@ -5,7 +5,7 @@ from MAMAMIA.src.challenge.scoring_task1 import generate_scores
 
 og_coords = {}
 
-data_dir = os.environ.get("MAMA-MIA")
+data_dir = os.environ.get('MAMAMIA_DATA')
 
 def getBoundingBox(imagePath: str, patient_id: str, patientInfo: dict):
     assert imagePath.endswith(".nii.gz"), f"Bad image path ending: {imagePath}"
@@ -93,6 +93,11 @@ def evaluateAcrossDatasets(inpDir: str):
     # Print the results
     for group, avg in average_dsc.items():
         print(f"Average DSC for {group}: {avg}")
+
+def doScoring(inpDir: str, corrupted: bool = False):
+    doUncropping(inpDir)
+    generate_scores(data_dir, inpDir, forCorrupted=corrupted)
+    evaluateAcrossDatasets(inpDir)
 
 if __name__ == "__main__":
     inpDir = "./transformer_128_skips_fair"

@@ -1,6 +1,6 @@
 import torch
 from dynamic_network_architectures.architectures.unet import PlainConvUNet
-from myTransformer import MyTransformer
+from myTransformer import MyTransformer, AttentionPool, ClassifierHead
 
 class myUNet(torch.nn.Module):
     def __init__(self, 
@@ -24,12 +24,27 @@ class myUNet(torch.nn.Module):
         self.encoder = MyTransformer(expectedChannels, expectedStride, inChannels)
         self.decoder = pretrainedModelArch.decoder
 
+        self.attn_pool = AttentionPool(dim=expectedChannels[-1], heads=4)
+        self.classifier_head = ClassifierHead(dim=expectedChannels[-1])
+
+        self.ret = "both"
+
     def forward(self, x: torch.Tensor, metadata: list = None):
-        x, skips = self.encoder(x, metadata)
+        x, skips, transformer_tokens = self.encoder(x, metadata)
         skips[-1] = x
         x = self.decoder(skips)
 
-        return x
+        if self.ret == "seg":
+            return x
+
+        pooled = self.attn_pool(transformer_tokens)
+        cls_out = self.classifier_head(pooled)
+
+        if self.ret == "both":
+            return x, cls_out
+        elif self.ret == "cls":
+            return cls_out
+        return
     
 if __name__ == "__main__":
     basepath = r"C:\Users\stoughth\mama-mia-challenge\phase1_submission\Dataset102_BreastTumor\nnUNetTrainer__nnUNetPlans__3d_fullres"
