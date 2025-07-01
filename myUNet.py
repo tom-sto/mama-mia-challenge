@@ -30,6 +30,8 @@ class myUNet(torch.nn.Module):
         self.ret = "both"
 
     def forward(self, x: torch.Tensor, metadata: list = None):
+        B = x.shape[0]
+        imgShape = x.shape[2:]
         x, skips, transformer_tokens = self.encoder(x, metadata)
         skips[-1] = x
         x = self.decoder(skips)
@@ -43,10 +45,17 @@ class myUNet(torch.nn.Module):
         if self.ret == "both":
             return x, cls_out
         elif self.ret == "cls":
+            cls_out = torch.sigmoid(cls_out)     # activate before sending to "segmentation"
             filled = []
-            for b in range(x.shape[0]):
-                filled.append(torch.fill(torch.empty_like(x[b]), cls_out[b].item()).to(x.device))
-            filled = torch.stack(filled, dim=0)
+            # print("x shape:", x.shape)
+            # print("cls_out shape:", cls_out.shape)
+            # this is some fuckery. it might work tho...
+            for b in range(B):
+                fg = torch.fill(torch.empty(imgShape), cls_out[b].item()).to(x.device)
+                bg = -fg + 1
+                filled.append(torch.stack([bg, fg], dim=0))  # [2, H, W, D]
+            filled = torch.stack(filled, dim=0)     # [B, 2, H, W, D]
+            print("cls_out:", cls_out)
             return filled
         return
     

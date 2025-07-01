@@ -2,7 +2,6 @@ import torch
 import json
 import os
 import math
-from typing import Union
 # import SimpleITK as sitk
 # from transformers import get_cosine_schedule_with_warmup
 from torch.utils.tensorboard import SummaryWriter
@@ -20,9 +19,9 @@ class PCRLoss(torch.nn.Module):
         for example: total_loss = alpha * BCE + beta * focal or another auxiliary term.
         """
         super(PCRLoss, self).__init__()
-        self.bce = torch.nn.BCEWithLogitsLoss()  # handles sigmoid internally
+        self.bce = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor(2.))  # this data set sees 70% negative, 30% positive
 
-    def forward(self, logits: torch.Tensor, targets: Union[list[int], torch.Tensor]):
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor):
         """
         Args:
             logits: (B,) or (B, 1) raw model outputs (before sigmoid)
@@ -36,10 +35,6 @@ class PCRLoss(torch.nn.Module):
         if logits.ndim == 2 and logits.shape[1] == 1:
             logits = logits.squeeze(1)  # shape (B,)
 
-        # Filter out entries where targets are -1
-        mask = targets != -1
-        logits = logits[mask]
-        targets = targets[mask]
         loss = self.bce(logits, targets)
 
         return loss
@@ -157,6 +152,7 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
     trainer.on_train_start()
 
     cls_losses = []
+    pcr_percentages = []
     import matplotlib.pyplot as plt
 
     for epoch in range(trainer.current_epoch, trainer.num_epochs):
@@ -181,12 +177,15 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
             trainer.on_validation_epoch_start()
             val_outputs = []
             cls_losses_avg = []
+            pcr_preds_avg = []
             for batch_id in range(trainer.num_val_iterations_per_epoch):
-                val_out, cls_loss = trainer.validation_step(next(trainer.dataloader_val))
+                val_out, cls_loss, pcr_perc = trainer.validation_step(next(trainer.dataloader_val))
                 val_outputs.append(val_out)
-                cls_losses_avg.append(cls_loss.item())
+                cls_losses_avg.append(cls_loss)
+                pcr_preds_avg.append(pcr_perc)
 
             cls_losses.append(sum(cls_losses_avg) / len(cls_losses_avg))
+            pcr_percentages.append(sum(pcr_preds_avg) / len(pcr_preds_avg))
             trainer.on_validation_epoch_end(val_outputs)
 
         if epoch % trainer.save_every == 0 and trainer.current_epoch != (trainer.num_epochs - 1):
@@ -199,13 +198,28 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
 
         trainer.on_epoch_end()
 
-        # fix the sizing of the plots
-        plt.figure(figsize=(10, 5))
-        plt.plot(cls_losses, label='Classification Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Classification Loss Over Epochs')
-        plt.savefig(os.path.join(trainer.output_folder, 'classification_loss.png'))
+        # fix the sizing of the plots with dual y-axes
+        fig, ax1 = plt.subplots(figsize=(10, 5))
+
+        # Plot PCR Accuracy on the left y-axis
+        ax1.plot(pcr_percentages, label='PCR Accuracy', color='blue')
+        ax1.set_xlabel('Epoch', fontsize=12)
+        ax1.set_ylabel('PCR Accuracy', fontsize=12, color='blue')
+        ax1.tick_params(axis='y', labelcolor='blue', labelsize=10)
+        ax1.tick_params(axis='x', labelsize=10)
+
+        # Create a second y-axis for BCE Loss on the right
+        ax2 = ax1.twinx()
+        ax2.plot(cls_losses, label='BCE Loss', color='red')
+        ax2.set_ylabel('BCE Loss', fontsize=12, color='red')
+        ax2.tick_params(axis='y', labelcolor='red', labelsize=10)
+
+        # Add a title and adjust layout
+        plt.title('PCR Prediction Accuracy and BCE Loss Over Epochs', fontsize=14)
+        fig.tight_layout()  # Adjust layout to prevent clipping
+
+        # Save the plot
+        plt.savefig(os.path.join(trainer.output_folder, 'pcr_progress.png'))
         plt.clf()
     
     saveModel(trainer, os.path.join(trainer.output_folder, "checkpoint_final_myUNet.pth"))
@@ -237,6 +251,9 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
 
     # do pCR inference
     trainer.network.ret = "cls"
+    predictor = nnUNetPredictor(tile_step_size=1, use_gaussian=False, use_mirroring=False,
+                                perform_everything_on_device=True, device=trainer.device, verbose=False,
+                                verbose_preprocessing=False, allow_tqdm=False)
     predictor.manual_initialization(trainer.network, trainer.plans_manager, trainer.configuration_manager,
                                     [state_dict], trainer.dataset_json, trainer.__class__.__name__,
                                     trainer.inference_allowed_mirroring_axes)
@@ -261,7 +278,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_joint"
+    tag = "_transformer_joint_pos_weight_and_more_augmentations"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 

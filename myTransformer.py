@@ -106,7 +106,7 @@ class ClassifierHead(nn.Module):
         )
 
     def forward(self, x):
-        return self.fc(x)  # (B, num_classes)
+        return self.fc(x) # (B, 1)
 
 class MyTransformer(nn.Module):
     def __init__(
