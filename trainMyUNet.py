@@ -14,14 +14,12 @@ from myUNet import myUNet
 writer = None
 
 class PCRLoss(torch.nn.Module):
-    def __init__(self, alpha=0.5, beta=0.5):
+    def __init__(self):
         """
         alpha and beta are weighting terms in case you want to combine BCE with another loss
         for example: total_loss = alpha * BCE + beta * focal or another auxiliary term.
         """
         super(PCRLoss, self).__init__()
-        self.alpha = alpha
-        self.beta = beta  # currently unused, but kept for extension
         self.bce = torch.nn.BCEWithLogitsLoss()  # handles sigmoid internally
 
     def forward(self, logits: torch.Tensor, targets: Union[list[int], torch.Tensor]):
@@ -42,7 +40,7 @@ class PCRLoss(torch.nn.Module):
         mask = targets != -1
         logits = logits[mask]
         targets = targets[mask]
-        loss = self.alpha * self.bce(logits, targets)
+        loss = self.bce(logits, targets)
 
         return loss
 
@@ -201,6 +199,8 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
 
         trainer.on_epoch_end()
 
+        # fix the sizing of the plots
+        plt.figure(figsize=(10, 5))
         plt.plot(cls_losses, label='Classification Loss')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
@@ -211,7 +211,7 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
     saveModel(trainer, os.path.join(trainer.output_folder, "checkpoint_final_myUNet.pth"))
     trainer.on_train_end()
 
-def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = "./outputs"):
+def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = "./outputs", outputPathPCR: str = "./outputs_pcr"):
     trainer.set_deep_supervision_enabled(False)
     state_dict = torch.load(state_dict_path, map_location=trainer.device, weights_only=False)['network_weights']
     trainer.network.load_state_dict(state_dict)
@@ -224,7 +224,7 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
     predictor.manual_initialization(trainer.network, trainer.plans_manager, trainer.configuration_manager,
                                     [state_dict], trainer.dataset_json, trainer.__class__.__name__,
                                     trainer.inference_allowed_mirroring_axes)
-    inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")
+    inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")       # THESE IMAGES ARE CROPPED
 
     os.makedirs(outputPath, exist_ok=True)
     ret = predictor.predict_from_files(
@@ -237,7 +237,17 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
 
     # do pCR inference
     trainer.network.ret = "cls"
-    ...
+    predictor.manual_initialization(trainer.network, trainer.plans_manager, trainer.configuration_manager,
+                                    [state_dict], trainer.dataset_json, trainer.__class__.__name__,
+                                    trainer.inference_allowed_mirroring_axes)
+    os.makedirs(outputPathPCR, exist_ok=True)
+    ret = predictor.predict_from_files(
+        inputFolder,
+        outputPathPCR
+    )
+
+    from predictPCR import scorePCR
+    scorePCR(outputPathPCR)
     
 
 if __name__ == "__main__":
@@ -259,7 +269,9 @@ if __name__ == "__main__":
                            device, 
                            pretrainedModelPath, 
                            tag=tag)
-    state_dict_path = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}/checkpoint_best_myUNet.pth"
+    
+    output_folder = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}"
+    state_dict_path = rf"{output_folder}/checkpoint_best_myUNet.pth"
     
     # lr = []
     # for epoch in range(trainer.num_epochs):
@@ -272,4 +284,7 @@ if __name__ == "__main__":
     # plt.ylabel("Learning Rate")
     # plt.savefig("lr_schedule.png")
     train(trainer)
-    inference(trainer, state_dict_path, outputPath=rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}/outputs/pred_segmentations_cropped")
+    inference(trainer, 
+              state_dict_path, 
+              outputPath=rf"{output_folder}/outputs/pred_segmentations_cropped",
+              outputPathPCR=rf"{output_folder}/outputs/pred_PCR_cropped")

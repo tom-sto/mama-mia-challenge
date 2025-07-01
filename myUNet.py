@@ -43,7 +43,11 @@ class myUNet(torch.nn.Module):
         if self.ret == "both":
             return x, cls_out
         elif self.ret == "cls":
-            return cls_out
+            filled = []
+            for b in range(x.shape[0]):
+                filled.append(torch.fill(torch.empty_like(x[b]), cls_out[b].item()).to(x.device))
+            filled = torch.stack(filled, dim=0)
+            return filled
         return
     
 if __name__ == "__main__":
