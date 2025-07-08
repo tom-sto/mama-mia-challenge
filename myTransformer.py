@@ -44,7 +44,8 @@ class DeepPatchEmbed3D(nn.Module):
         self.encoder = nn.ModuleList([])
         self.decoder = nn.ModuleList([])
 
-        groups = [max(min(8, ch // 8), 1) for ch in channels]
+        groups = [max(min(8, ch // 16), 1) for ch in channels]
+        print(f"Using groups: {groups} for channels: {channels}")
         
         for i in range(len(channels) - 1):
             block = nn.Sequential(
@@ -122,9 +123,6 @@ class MyTransformer(nn.Module):
         self.channels = channels
         self.inChannels = in_channels
         self.emb_dim = channels[-1]
-
-        print(f"channels: {self.channels}")
-        print(f"inChannels: {self.inChannels}")
 
         self.patch_embed = DeepPatchEmbed3D(channels, in_channels, strides)
         self.pos_embed = nn.Parameter(torch.randn((self.emb_dim,)), requires_grad=True)  # learnable position embedding
@@ -250,11 +248,18 @@ class MyTransformer(nn.Module):
         for i in range(len(skips)):
             skips[i] = (1 - self.skip_weights[i]) * skips[i] + self.skip_weights[i] * tf_skips[i]
 
+        # print("x shape before reshape:", x.shape)
+
         # reshape to match conv shape
         x = x.reshape(B*N, X, Y, Z, E)
         x = x.permute(0, 4, 1, 2, 3)
         x = unpatchTensor(x, nSubPatches)
         # print("Final x grad_fn:", x.grad_fn)
+
+        # print("Final x shape:", x.shape)
+        # print("Final skips shape:", [s.shape for s in skips])
+        # print("Final tokens shape:", tokens.shape)
+        # print("x == last layer?", torch.all(x == tf_skips[-1]))
 
         return x, skips, tokens
 

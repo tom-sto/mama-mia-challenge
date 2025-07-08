@@ -8,6 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import _LRScheduler
 from MAMAMIA.nnUNet.nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from MAMAMIA.nnUNet.nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+from torchjd.aggregation import UPGrad
 from myUNet import myUNet
 
 writer = None
@@ -19,7 +20,7 @@ class PCRLoss(torch.nn.Module):
         for example: total_loss = alpha * BCE + beta * focal or another auxiliary term.
         """
         super(PCRLoss, self).__init__()
-        self.bce = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor(2.))  # this data set sees 70% negative, 30% positive
+        self.bce = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor(2.4))  # this data set sees 70% negative, 30% positive
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor):
         """
@@ -35,7 +36,7 @@ class PCRLoss(torch.nn.Module):
         if logits.ndim == 2 and logits.shape[1] == 1:
             logits = logits.squeeze(1)  # shape (B,)
 
-        loss = self.bce(logits, targets)
+        loss = self.bce(logits, targets).float()
 
         return loss
 
@@ -115,14 +116,20 @@ def setupTrainer(plansJSONPath: str,
     trainer.num_iterations_per_epoch = 200
     trainer.num_val_iterations_per_epoch = 50
     trainer.num_epochs = 1000
-    trainer.initial_lr = 1e-5
+    trainer.initial_lr = 2e-5
     trainer.initialize()
 
     model = myUNet(trainer.network, nInChannels, expectedChannels, expectedStride, pretrainedModelPath).to(device)
     trainer.network = model
 
     # change optimizer and scheduler
-    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.initial_lr, weight_decay=1e-4)
+    params = [
+        *model.encoder.parameters(),
+        *model.decoder.parameters(),
+        *model.classifier.parameters(),
+    ]
+    trainer.optimizer = torch.optim.AdamW(params, lr=trainer.initial_lr, weight_decay=1e-4)
+    trainer.aggregator = UPGrad()
 
     num_training_steps = trainer.num_epochs           # scheduler steps every epoch, not every batch
     num_warmup_steps = round(0.2 * num_training_steps)  # 20% warmup
@@ -138,6 +145,7 @@ def setupTrainer(plansJSONPath: str,
     )
 
     trainer.cls_loss = PCRLoss()
+    trainer.cls_loss_weight = 1e-3
 
     trainer.disable_checkpointing = True    # we will do this manually
 
@@ -248,6 +256,8 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
 
     from score_task1 import doScoring
     doScoring(os.path.dirname(outputPath))
+    import pdb
+    pdb.set_trace()
 
     # do pCR inference
     trainer.network.ret = "cls"
@@ -278,7 +288,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_joint_pos_weight_and_more_augmentations"
+    tag = "_transformer_joint_no_transpose_JD"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 

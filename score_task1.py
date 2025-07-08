@@ -94,13 +94,15 @@ def evaluateAcrossDatasets(inpDir: str):
     for group, avg in average_dsc.items():
         print(f"Average DSC for {group}: {avg}")
 
+    print("Overall Average DSC:", df['DSC'].dropna().mean())
+
 def doScoring(inpDir: str, corrupted: bool = False):
     doUncropping(inpDir)
     generate_scores(data_dir, inpDir, forCorrupted=corrupted)
     evaluateAcrossDatasets(inpDir)
 
 if __name__ == "__main__":
-    inpDir = "./transformer_128_skips_fair"
-    doUncropping(inpDir)
-    generate_scores(inpDir)
+    inpDir = "./nnUNet_results/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_4_transformer_joint_pos_weight_and_more_augmentations/outputs"
+    # doUncropping(inpDir)
+    generate_scores(data_dir, inpDir)
     evaluateAcrossDatasets(inpDir)

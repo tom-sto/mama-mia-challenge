@@ -17,13 +17,13 @@ def scorePCR(outputDir: str,
         arr = sitk.GetArrayFromImage(img)
         pcr_pred = int(np.mean(arr) > threshold)
         patient_id = imgName.split('.')[0].upper()
-        print("Processing patient:", patient_id)
-        print("Arr", np.unique(arr))
-        print("fg/total:", np.mean(arr))
-        print("final prediction:", pcr_pred)
+        # print("Processing patient:", patient_id)
+        # print("Arr", np.unique(arr))
+        # print("fg/total:", np.mean(arr))
+        # print("final prediction:", pcr_pred)
 
         pcr_label = df.loc[df['patient_id'] == patient_id, 'pcr'].values[0]
-        print("Actual label:", pcr_label)
+        # print("Actual label:", pcr_label)
 
         correct = pcr_pred == pcr_label
         new_row = pd.DataFrame({
