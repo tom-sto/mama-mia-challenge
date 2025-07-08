@@ -8,10 +8,37 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import _LRScheduler
 from MAMAMIA.nnUNet.nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from MAMAMIA.nnUNet.nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-from MAMAMIA.nnUNet.nnunetv2.evaluation.evaluate_predictions import compute_metrics_on_folder
+from torchjd.aggregation import UPGrad
 from myUNet import myUNet
 
 writer = None
+
+class PCRLoss(torch.nn.Module):
+    def __init__(self):
+        """
+        alpha and beta are weighting terms in case you want to combine BCE with another loss
+        for example: total_loss = alpha * BCE + beta * focal or another auxiliary term.
+        """
+        super(PCRLoss, self).__init__()
+        self.bce = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor(2.4))  # this data set sees 70% negative, 30% positive
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor):
+        """
+        Args:
+            logits: (B,) or (B, 1) raw model outputs (before sigmoid)
+            targets: list of ints (0 or 1), or a torch.Tensor of shape (B,)
+        """
+        # Convert list to tensor if needed
+        if isinstance(targets, list):
+            targets = torch.tensor(targets, dtype=torch.float32, device=logits.device)
+
+        # Ensure logits and targets match in shape
+        if logits.ndim == 2 and logits.shape[1] == 1:
+            logits = logits.squeeze(1)  # shape (B,)
+
+        loss = self.bce(logits, targets).float()
+
+        return loss
 
 class WarmupCosineAnnealingWithRestarts(_LRScheduler):
     def __init__(self, optimizer, warmup_steps, cycle_steps, cycle_mult=1.0, max_lr=1e-3, min_lr=1e-5, damping=1.0, last_epoch=-1):
@@ -89,18 +116,24 @@ def setupTrainer(plansJSONPath: str,
     trainer.num_iterations_per_epoch = 200
     trainer.num_val_iterations_per_epoch = 50
     trainer.num_epochs = 1000
-    trainer.initial_lr = 1e-5
+    trainer.initial_lr = 2e-5
     trainer.initialize()
 
     model = myUNet(trainer.network, nInChannels, expectedChannels, expectedStride, pretrainedModelPath).to(device)
     trainer.network = model
 
     # change optimizer and scheduler
-    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.initial_lr, weight_decay=1e-4)
+    params = [
+        *model.encoder.parameters(),
+        *model.decoder.parameters(),
+        *model.classifier.parameters(),
+    ]
+    trainer.optimizer = torch.optim.AdamW(params, lr=trainer.initial_lr, weight_decay=1e-4)
+    trainer.aggregator = UPGrad()
 
     num_training_steps = trainer.num_epochs           # scheduler steps every epoch, not every batch
     num_warmup_steps = round(0.2 * num_training_steps)  # 20% warmup
-    num_cycle_steps = round(0.1 * num_training_steps) + 1
+    num_cycle_steps = round(0.2 * num_training_steps) + 1
 
     trainer.lr_scheduler = WarmupCosineAnnealingWithRestarts(
         trainer.optimizer,
@@ -108,8 +141,11 @@ def setupTrainer(plansJSONPath: str,
         cycle_steps=num_cycle_steps,
         max_lr=trainer.initial_lr,
         min_lr=1e-10,
-        damping=0.85
+        damping=0.8
     )
+
+    trainer.cls_loss = PCRLoss()
+    trainer.cls_loss_weight = 1e-3
 
     trainer.disable_checkpointing = True    # we will do this manually
 
@@ -122,6 +158,10 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
     else:
         trainer.current_epoch = 0
     trainer.on_train_start()
+
+    cls_losses = []
+    pcr_percentages = []
+    import matplotlib.pyplot as plt
 
     for epoch in range(trainer.current_epoch, trainer.num_epochs):
         trainer.on_epoch_start()
@@ -144,8 +184,16 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
         with torch.no_grad():
             trainer.on_validation_epoch_start()
             val_outputs = []
+            cls_losses_avg = []
+            pcr_preds_avg = []
             for batch_id in range(trainer.num_val_iterations_per_epoch):
-                val_outputs.append(trainer.validation_step(next(trainer.dataloader_val)))
+                val_out, cls_loss, pcr_perc = trainer.validation_step(next(trainer.dataloader_val))
+                val_outputs.append(val_out)
+                cls_losses_avg.append(cls_loss)
+                pcr_preds_avg.append(pcr_perc)
+
+            cls_losses.append(sum(cls_losses_avg) / len(cls_losses_avg))
+            pcr_percentages.append(sum(pcr_preds_avg) / len(pcr_preds_avg))
             trainer.on_validation_epoch_end(val_outputs)
 
         if epoch % trainer.save_every == 0 and trainer.current_epoch != (trainer.num_epochs - 1):
@@ -157,15 +205,40 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
             saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_latest_myUNet.pth'))
 
         trainer.on_epoch_end()
+
+        # fix the sizing of the plots with dual y-axes
+        fig, ax1 = plt.subplots(figsize=(10, 5))
+
+        # Plot PCR Accuracy on the left y-axis
+        ax1.plot(pcr_percentages, label='PCR Accuracy', color='blue')
+        ax1.set_xlabel('Epoch', fontsize=12)
+        ax1.set_ylabel('PCR Accuracy', fontsize=12, color='blue')
+        ax1.tick_params(axis='y', labelcolor='blue', labelsize=10)
+        ax1.tick_params(axis='x', labelsize=10)
+
+        # Create a second y-axis for BCE Loss on the right
+        ax2 = ax1.twinx()
+        ax2.plot(cls_losses, label='BCE Loss', color='red')
+        ax2.set_ylabel('BCE Loss', fontsize=12, color='red')
+        ax2.tick_params(axis='y', labelcolor='red', labelsize=10)
+
+        # Add a title and adjust layout
+        plt.title('PCR Prediction Accuracy and BCE Loss Over Epochs', fontsize=14)
+        fig.tight_layout()  # Adjust layout to prevent clipping
+
+        # Save the plot
+        plt.savefig(os.path.join(trainer.output_folder, 'pcr_progress.png'))
+        plt.clf()
     
     saveModel(trainer, os.path.join(trainer.output_folder, "checkpoint_final_myUNet.pth"))
     trainer.on_train_end()
 
-def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = "./outputs"):
+def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = "./outputs", outputPathPCR: str = "./outputs_pcr"):
     trainer.set_deep_supervision_enabled(False)
     state_dict = torch.load(state_dict_path, map_location=trainer.device, weights_only=False)['network_weights']
     trainer.network.load_state_dict(state_dict)
     trainer.network.eval()
+    trainer.network.ret = "seg"
 
     predictor = nnUNetPredictor(tile_step_size=0.5, use_gaussian=True, use_mirroring=True,
                                 perform_everything_on_device=True, device=trainer.device, verbose=False,
@@ -173,17 +246,36 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
     predictor.manual_initialization(trainer.network, trainer.plans_manager, trainer.configuration_manager,
                                     [state_dict], trainer.dataset_json, trainer.__class__.__name__,
                                     trainer.inference_allowed_mirroring_axes)
-    inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")
+    inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")       # THESE IMAGES ARE CROPPED
 
     os.makedirs(outputPath, exist_ok=True)
-    ret = predictor.predict_from_files_sequential(
+    ret = predictor.predict_from_files(
         inputFolder,
         outputPath
     )
 
-    from score_task1 import doUncropping, generate_scores
-    doUncropping(os.path.dirname(outputPath))
-    generate_scores(os.path.dirname(outputPath))
+    from score_task1 import doScoring
+    doScoring(os.path.dirname(outputPath))
+    import pdb
+    pdb.set_trace()
+
+    # do pCR inference
+    trainer.network.ret = "cls"
+    predictor = nnUNetPredictor(tile_step_size=1, use_gaussian=False, use_mirroring=False,
+                                perform_everything_on_device=True, device=trainer.device, verbose=False,
+                                verbose_preprocessing=False, allow_tqdm=False)
+    predictor.manual_initialization(trainer.network, trainer.plans_manager, trainer.configuration_manager,
+                                    [state_dict], trainer.dataset_json, trainer.__class__.__name__,
+                                    trainer.inference_allowed_mirroring_axes)
+    os.makedirs(outputPathPCR, exist_ok=True)
+    ret = predictor.predict_from_files(
+        inputFolder,
+        outputPathPCR
+    )
+
+    from predictPCR import scorePCR
+    scorePCR(outputPathPCR)
+    
 
 if __name__ == "__main__":
     writer = SummaryWriter()
@@ -196,7 +288,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_128_skips_fair_no_transpose"
+    tag = "_transformer_joint_no_transpose_JD"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
@@ -204,7 +296,9 @@ if __name__ == "__main__":
                            device, 
                            pretrainedModelPath, 
                            tag=tag)
-    state_dict_path = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}/checkpoint_best_myUNet.pth"
+    
+    output_folder = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}"
+    state_dict_path = rf"{output_folder}/checkpoint_best_myUNet.pth"
     
     # lr = []
     # for epoch in range(trainer.num_epochs):
@@ -217,4 +311,7 @@ if __name__ == "__main__":
     # plt.ylabel("Learning Rate")
     # plt.savefig("lr_schedule.png")
     train(trainer)
-    inference(trainer, state_dict_path, outputPath=rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}/outputs/pred_segmentations_cropped")
+    inference(trainer, 
+              state_dict_path, 
+              outputPath=rf"{output_folder}/outputs/pred_segmentations_cropped",
+              outputPathPCR=rf"{output_folder}/outputs/pred_PCR_cropped")

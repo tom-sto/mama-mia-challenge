@@ -44,7 +44,8 @@ class DeepPatchEmbed3D(nn.Module):
         self.encoder = nn.ModuleList([])
         self.decoder = nn.ModuleList([])
 
-        groups = [max(min(8, ch // 8), 1) for ch in channels]
+        groups = [max(min(8, ch // 16), 1) for ch in channels]
+        print(f"Using groups: {groups} for channels: {channels}")
         
         for i in range(len(channels) - 1):
             block = nn.Sequential(
@@ -52,10 +53,10 @@ class DeepPatchEmbed3D(nn.Module):
                 nn.Conv3d(channels[i], channels[i], kernel_size=3, padding=1) if i == 0 else nn.Identity(),
                 nn.Conv3d(channels[i], channels[i + 1], kernel_size=3, padding=1),
                 nn.ReLU(inplace=True),
-                nn.Dropout3d(p=0.3) if i == len(channels) - 2 else nn.Identity(),
                 nn.MaxPool3d(kernel_size=3, stride=strides[i], padding=1)
             )
             self.encoder.append(block)
+
         # Create decoder blocks (mirrored but reinitialized)
         for i in reversed(range(len(channels) - 1)):
             block = nn.Sequential(
@@ -84,14 +85,38 @@ class DeepPatchEmbed3D(nn.Module):
 
         return x, skips, (B, N, E, X, Y, Z)
 
+class AttentionPool(nn.Module):
+    def __init__(self, dim, heads=4):
+        super().__init__()
+        self.q = nn.Parameter(torch.randn(1, 1, dim))  # Learnable query token
+        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+
+    def forward(self, x):
+        B = x.size(0)
+        q = self.q.expand(B, -1, -1)  # (B, 1, dim)
+        attn_out, _ = self.attn(q, x, x)  # Attend to transformer tokens
+        return attn_out.squeeze(1)       # (B, dim)
+
+class ClassifierHead(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+
+    def forward(self, x):
+        return self.fc(x) # (B, 1)
+
 class MyTransformer(nn.Module):
     def __init__(
         self,
         channels,
         strides,
-        in_channels,
+        in_channels=2,
         transformer_depth=6,    # make this match num layers in decoder for skips: 6
-        num_heads=16,
+        num_heads=10,
     ):
         super().__init__()
 
@@ -99,12 +124,9 @@ class MyTransformer(nn.Module):
         self.inChannels = in_channels
         self.emb_dim = channels[-1]
 
-        print(f"channels: {self.channels}")
-        print(f"inChannels: {self.inChannels}")
-
         self.patch_embed = DeepPatchEmbed3D(channels, in_channels, strides)
         self.pos_embed = nn.Parameter(torch.randn((self.emb_dim,)), requires_grad=True)  # learnable position embedding
-        self.skip_weights = nn.Parameter(torch.rand(2, len(self.patch_embed.decoder)), requires_grad=True)  # learnable skip connection weights
+        self.skip_weights = nn.Parameter(torch.ones(len(self.patch_embed.decoder)) * 0.5, requires_grad=True)  # learnable skip connection weights
 
         nMetadataInFeatures = 7             # 1 for age (linear), 2 for menopausal status (one-hot), 4 for breast density (one-hot)
         nMetadataOutFeatures = num_heads    # needs to be divisible by num_heads
@@ -114,14 +136,14 @@ class MyTransformer(nn.Module):
         ageMax = 77
         self.ageEncode  = lambda x: torch.tensor([(x - ageMin) / (ageMax - ageMin)], dtype=torch.float32) if x is not None \
             else torch.tensor([0.5], dtype=torch.float32)   # normalize age to [0, 1] range, default to 0.5 if None
-        self.menoEncode = lambda x: torch.tensor([1, 0], dtype=torch.float32) if x == "pre" \
-            else torch.tensor([0, 1], dtype=torch.float32) if x == "post" \
-            else torch.tensor([0, 0], dtype=torch.float32)
-        self.densityEncode = lambda x: torch.tensor([1, 0, 0, 0], dtype=torch.float32) if x == "a" \
-            else torch.tensor([0, 1, 0, 0], dtype=torch.float32) if x == "b" \
-            else torch.tensor([0, 0, 1, 0], dtype=torch.float32) if x == "c" \
-            else torch.tensor([0, 0, 0, 1], dtype=torch.float32) if x == "d" \
-            else torch.tensor([0, 0, 0, 0], dtype=torch.float32)
+        self.menoEncode = lambda x: torch.tensor([1, 0]) if x == "pre" \
+            else torch.tensor([0, 1]) if x == "post" \
+            else torch.tensor([0, 0])
+        self.densityEncode = lambda x: torch.tensor([1, 0, 0, 0]) if x == "a" \
+            else torch.tensor([0, 1, 0, 0]) if x == "b" \
+            else torch.tensor([0, 0, 1, 0]) if x == "c" \
+            else torch.tensor([0, 0, 0, 1]) if x == "d" \
+            else torch.tensor([0, 0, 0, 0])
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.emb_dim + nMetadataOutFeatures,
@@ -209,6 +231,7 @@ class MyTransformer(nn.Module):
             tf_skips.append(y)
 
         x = self.fc_to_patches(x)  # [B, N, emb_dim]
+        tokens = x.clone()
 
         tf_skips = tf_skips[::-1]
         for i in range(len(tf_skips)):
@@ -223,7 +246,9 @@ class MyTransformer(nn.Module):
         tf_skips = tf_skips[::-1]
 
         for i in range(len(skips)):
-            skips[i] = self.skip_weights[0][i] * skips[i] + self.skip_weights[1][i] * tf_skips[i]
+            skips[i] = (1 - self.skip_weights[i]) * skips[i] + self.skip_weights[i] * tf_skips[i]
+
+        # print("x shape before reshape:", x.shape)
 
         # reshape to match conv shape
         x = x.reshape(B*N, X, Y, Z, E)
@@ -231,7 +256,12 @@ class MyTransformer(nn.Module):
         x = unpatchTensor(x, nSubPatches)
         # print("Final x grad_fn:", x.grad_fn)
 
-        return x, skips
+        # print("Final x shape:", x.shape)
+        # print("Final skips shape:", [s.shape for s in skips])
+        # print("Final tokens shape:", tokens.shape)
+        # print("x == last layer?", torch.all(x == tf_skips[-1]))
+
+        return x, skips, tokens
 
 if __name__ == "__main__":
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
