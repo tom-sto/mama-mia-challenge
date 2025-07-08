@@ -10,7 +10,6 @@ from MAMAMIA.nnUNet.nnunetv2.inference.predict_from_raw_data import nnUNetPredic
 from MAMAMIA.nnUNet.nnunetv2.evaluation.evaluate_predictions import compute_metrics_on_folder
 
 from myUNet import myUNet
-from xero import XERO
 
 writer = None
 
@@ -136,24 +135,14 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, inputFolder: str, ou
                                     trainer.inference_allowed_mirroring_axes)
     
 
-    os.makedirs(outputPath, exist_ok=True)
-    ret = predictor.predict_from_files(
-        inputFolder,
-        outputPath
-    )
+    # os.makedirs(outputPath, exist_ok=True)
+    # ret = predictor.predict_from_files(
+    #     inputFolder,
+    #     outputPath
+    # )
 
-    metrics = compute_metrics_on_folder(os.path.join(trainer.preprocessed_dataset_folder_base, 'gt_segmentations'),
-                                        outputPath,
-                                        os.path.join(outputPath, 'summary.json'),
-                                        trainer.plans_manager.image_reader_writer_class(),
-                                        trainer.dataset_json["file_ending"],
-                                        trainer.label_manager.foreground_regions if trainer.label_manager.has_regions else
-                                        trainer.label_manager.foreground_labels,
-                                        trainer.label_manager.ignore_label)
-    
-    trainer.print_to_log_file("Validation complete", also_print_to_console=True)
-    trainer.print_to_log_file("Mean Validation Dice: ", (metrics['foreground_mean']["Dice"]),
-                              also_print_to_console=True)
+    from score_task1 import doScoring
+    doScoring(os.path.dirname(outputPath))
 
 # def postProcess(segmentationPath: str):
 #     from scipy.ndimage import label, binary_opening, binary_closing, binary_fill_holes
@@ -179,15 +168,15 @@ if __name__ == "__main__":
     datasetName = "Dataset104_cropped_3ch_breast"
     basepath = rf"{os.environ["nnUNet_preprocessed"]}/{datasetName}"
     pretrainedModelPath = "nnunet_pretrained_weights_64_final.pth"
+    pretrainedModelPath = None
     plansPath = rf"{basepath}/nnUNetPlans.json"
     datasetPath = rf"{basepath}/dataset.json"
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    trainer = setupTrainer(plansPath, "3d_fullres", fold, datasetPath, device, pretrainedModelPath)
-    # state_dict_path = r"nnUNet_results\Dataset104_cropped_3ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4\checkpoint_final.pth"
-    state_dict_path = r"checkpoint_latest_myUNet.pth"
-    train(trainer)
+    trainer = setupTrainer(plansPath, "3d_fullres", fold, datasetPath, device, pretrainedModelPath, transformer=False)
+    state_dict_path = r"nnUNet_results\Dataset104_cropped_3ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4\checkpoint_final.pth"
+    # state_dict_path = r"checkpoint_latest_myUNet.pth"
+    # train(trainer)
     inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")
-    # inference(trainer, state_dict_path, inputFolder)
+    inference(trainer, state_dict_path, inputFolder)

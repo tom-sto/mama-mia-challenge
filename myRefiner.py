@@ -27,8 +27,8 @@ class MyRefiner(torch.nn.Module):
             # Antonio says to put BatchNorm first in each encoder block
             encoderSteps.append(nn.BatchNorm3d(num_features=down_channels[i]))
 
-            # two consecutive 3x3x3 convolutions in first two encoder blocks
-            if i == 0 or i == 1:
+            # two consecutive 3x3x3 convolutions in first three encoder blocks
+            if i == 0 or i == 1 or i == 2:
                 encoderSteps.append(nn.Conv3d(in_channels=down_channels[i], out_channels=down_channels[i], kernel_size=3, padding=1))
             encoderSteps.append(nn.Conv3d(in_channels=down_channels[i], out_channels=down_channels[i+1], kernel_size=3, padding=1))
             encoderSteps.append(nn.ReLU(True))
@@ -44,7 +44,7 @@ class MyRefiner(torch.nn.Module):
                 if i % 2:
                     decoderSteps.insert(0, nn.Dropout3d(0.1))
                 decoderSteps.insert(0, nn.BatchNorm3d(num_features=up_channels[i]))
-            decoderSteps.insert(0, nn.Conv3d(in_channels=up_channels[i], out_channels=up_channels[i], kernel_size=3, padding=1))
+            decoderSteps.insert(0, nn.Conv3d(in_channels=up_channels[i] + down_channels[i+1], out_channels=up_channels[i], kernel_size=3, padding=1))
             decoderSteps.insert(0, nn.ConvTranspose3d(in_channels=up_channels[i+1], 
                                                       out_channels=up_channels[i], 
                                                       kernel_size=3, 
@@ -64,8 +64,15 @@ class MyRefiner(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.to(torch.float32)
+        encoder_outputs = []
+
         for layer in self.encoder:
+            if isinstance(layer, nn.MaxPool3d):
+                encoder_outputs.append(x)           # take skips from right after activation
             x = layer(x)
+
+        # for i, skip in enumerate(encoder_outputs):
+        #     print(f"Skip {i} has shape {skip.shape}")
 
         # output here is the latent space
         for layer in self.bottleneck:
@@ -73,7 +80,15 @@ class MyRefiner(torch.nn.Module):
         
         self.latentRep = torch.flatten(x, start_dim=1)      # keep images in batch separate
 
+        skip_idx = len(encoder_outputs) - 1
         for layer in self.decoder:
+            if isinstance(layer, nn.Conv3d):        # add skips in front of Conv3d
+                skip = encoder_outputs[skip_idx]
+                # print(f"Decoder {i}: trying to take skip of shape {skip.shape}")
+                # print(f"\t and append it to x: {x.shape}")
+                x = torch.cat([x, skip], dim=1)
+                # print(f"\tNew x shape: {x.shape}")
+                skip_idx -= 1
             x = layer(x)
         
         return x

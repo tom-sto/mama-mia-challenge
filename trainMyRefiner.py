@@ -3,6 +3,8 @@ import json
 import os
 import SimpleITK as sitk
 from torch.utils.tensorboard import SummaryWriter
+from corruptor import makeCorruptedDatasetFromPreviousPredictions
+from score_task1 import doCropping
 
 from MAMAMIA.nnUNet.nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from MAMAMIA.nnUNet.nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
@@ -27,15 +29,15 @@ def setupTrainer(plansJSONPath: str,
         datasetInfo: dict = json.load(fp)
 
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device, tag)
-    trainer.weight_bd = 0
+    trainer.weight_bd = 1
     trainer.num_iterations_per_epoch = 1000
     trainer.num_val_iterations_per_epoch = 400
-    trainer.num_epochs = 800
+    trainer.num_epochs = 400
     trainer.enable_deep_supervision = False
     trainer.initial_lr = 5e-5
     trainer.initialize()
 
-    model = MyRefiner().to(device)
+    model = MyRefiner().to(trainer.device)
     trainer.network = model
     trainer.oversample_foreground_percent = 0.8
 
@@ -101,12 +103,13 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, inputFolder: str, ou
     
 
     os.makedirs(outputPath, exist_ok=True)
-    ret = predictor.predict_from_files(
-        inputFolder,
-        outputPath
-    )
+    # ret = predictor.predict_from_files(
+    #     inputFolder,
+    #     outputPath
+    # )
 
-    forCorrupted = 'Dataset666_corrupted_preds' in outputPath
+    # forCorrupted = 'Dataset666_corrupted_preds' in outputPath
+    forCorrupted = False
 
     from score_task1 import doScoring
     doScoring(os.path.dirname(outputPath), forCorrupted)
@@ -138,16 +141,23 @@ if __name__ == "__main__":
     datasetPath = rf"{basepath}\dataset.json"
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    fold = 4
-    tag = "_with_mri_64"
+    fold = 0
+    tag = "_with_mri_128"
     trainer = setupTrainer(plansPath, "3d_fullres", fold, datasetPath, device, tag)
-    state_dict_path = os.path.join(trainer.output_folder, "checkpoint_final.pth")
-    train(trainer)
-    inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")
+    state_dict_path = os.path.join(trainer.output_folder, "checkpoint_best.pth")
+    # train(trainer, resume=True, checkpoint=os.path.join(os.environ["nnUNet_results"], 
+    #                                                     datasetName, 
+    #                                                     "nnUNetTrainer__nnUNetPlans__3d_fullres", 
+    #                                                     f"fold_{fold}{tag}", 
+    #                                                     "checkpoint_best.pth"))
+    corruptedInputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")
+    inputFolder = r"nnUNet_results\Dataset104_cropped_3ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4_transformer_128_skips\pred_segmentations"
+    croppedInputs = doCropping(inputFolder)
+    refinerInput = makeCorruptedDatasetFromPreviousPredictions(croppedInputs, corruptedInputFolder)
     outputFolder = os.path.join(os.environ["nnUNet_results"], 
                                 datasetName, 
                                 "nnUNetTrainer__nnUNetPlans__3d_fullres", 
                                 f"fold_{fold}{tag}", 
                                 "results",
-                                "pred_segmentations_cropped")
-    inference(trainer, state_dict_path, inputFolder, outputFolder)
+                                "pred_segmentations_from_transformer_skips")
+    inference(trainer, state_dict_path, refinerInput, outputFolder)

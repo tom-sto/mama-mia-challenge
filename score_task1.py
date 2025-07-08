@@ -57,7 +57,7 @@ def uncropToOriginalCoords(cropped_image_path: str, patient_id: str):
     return uncropped_image
 
 def doUncropping(inpDir: str, forCorrupted: bool = False):
-    croppedDir = os.path.join(inpDir, 'pred_segmentations_cropped')
+    croppedDir = os.path.join(inpDir, 'pred_segmentations_from_transformer_skips')
     uncroppedDir = os.path.join(inpDir, 'pred_segmentations')
     os.makedirs(uncroppedDir, exist_ok=True)
     for imgName in os.listdir(croppedDir):
@@ -75,11 +75,58 @@ def doUncropping(inpDir: str, forCorrupted: bool = False):
         uncroppedImg = uncropToOriginalCoords(imgPath, patientID)
         sitk.WriteImage(uncroppedImg, os.path.join(uncroppedDir, imgName))
 
+def doCropping(inpDir: str):
+    outputDir = inpDir + "_cropped"
+    os.makedirs(outputDir, exist_ok=True)
+
+    for imgName in os.listdir(inpDir):
+        if not imgName.endswith('.nii.gz'):
+            continue
+        patientID = imgName.split('.')[0]
+        patientInfoPath = os.path.join(r'E:\MAMA-MIA\patient_info_files', f'{patientID}.json')
+        with open(patientInfoPath, 'r') as f:
+            patientInfo = json.load(f)
+        imgPath = os.path.join(inpDir, imgName)
+        ogImgPath = os.path.join(r'E:\MAMA-MIA\images', patientID.upper(), f'{patientID}_0000.nii.gz')
+        getBoundingBox(ogImgPath, patientID, patientInfo)
+        bbox = og_coords[patientID]["bounding_box"]
+        ogImg = sitk.ReadImage(imgPath)
+        croppedImg: sitk.Image = sitk.RegionOfInterest(
+            ogImg,
+            size=[bbox["x_max"] - bbox["x_min"], bbox["y_max"] - bbox["y_min"], bbox["z_max"] - bbox["z_min"]],
+            index=[bbox["x_min"], bbox["y_min"], bbox["z_min"]]
+        )
+        croppedImg.SetOrigin(croppedImg.GetOrigin())
+        croppedImg.SetDirection(croppedImg.GetDirection())
+        croppedImg.SetSpacing(croppedImg.GetSpacing())
+        sitk.WriteImage(croppedImg, os.path.join(outputDir, imgName))
+    return outputDir
+
+def evaluateAcrossDatasets(inpDir: str):
+    import pandas as pd
+
+    # Load your CSV file into a DataFrame
+    df = pd.read_csv(f'{inpDir}/results_task1.csv')
+
+    # Filter and calculate average DSC for each group
+    groups = ["DUKE", "ISPY1", "ISPY2", "NACT"]
+    average_dsc = {}
+
+    for group in groups:
+        # Filter rows where patient_id contains the group and ignore NaN values in DSC
+        group_df = df[df['patient_id'].str.contains(group, na=False)]
+        average_dsc[group] = group_df['DSC'].mean()
+
+    # Print the results
+    for group, avg in average_dsc.items():
+        print(f"Average DSC for {group}: {avg}")
+
 def doScoring(inputDir, forCorrupted: bool = False):
     doUncropping(inputDir, forCorrupted)
-    generate_scores(inputDir, forCorrupted)
+    generate_scores(r"E:\MAMA-MIA", inputDir, forCorrupted)
+    evaluateAcrossDatasets(inputDir)
 
 if __name__ == "__main__":
-    inpDir = "./outputs-transformer-128"
-    doUncropping(inpDir)
-    generate_scores(inpDir)
+    inpDir = r"C:\Users\stoughth\Documents\mama-mia\nnUNet_results\Dataset666_corrupted_preds\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4_with_mri_64\results"
+    # doUncropping(inpDir)
+    generate_scores(r"E:\MAMA-MIA", inpDir, forCorrupted=True)

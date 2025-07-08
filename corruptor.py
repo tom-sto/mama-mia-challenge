@@ -1,12 +1,13 @@
 import numpy as np
 import os
+import SimpleITK as sitk
 # import sys
 # sys.path.append('./MAMAMIA')
 # from MAMAMIA.src.visualization import *
 # from MAMAMIA.src.preprocessing import read_segmentation_from_patient_id
 
 def WriteBinaryArrayToFile(arr, filepath, origin, spacing, direction):
-    import SimpleITK as sitk
+    
     img = sitk.GetImageFromArray(arr)
     img.SetOrigin(origin)
     img.SetSpacing(spacing)
@@ -215,6 +216,44 @@ def getMRIs(mriDir: str = r"E:\MAMA-MIA\nnUNet_raw\Dataset104_cropped_3ch_breast
 
     print()
     print("Done!")
+
+def makeCorruptedDatasetFromPreviousPredictions(inputFolder: str, corruptedInputFolder: str):
+    outputDir = os.path.join(os.path.dirname(inputFolder), 'refinerInputs')
+    try:
+        os.makedirs(outputDir)
+    except:
+        print("Output dir already exists, skipping this...")
+        return outputDir
+    import shutil
+    from edt import edt
+    for imgName in os.listdir(inputFolder):
+        if not imgName.endswith(".nii.gz"):
+            continue
+        patientID = imgName.split('.')[0]
+        
+        imgPath = os.path.join(inputFolder, imgName)
+        segImg = sitk.ReadImage(imgPath)
+        segArr = sitk.GetArrayFromImage(segImg)
+
+        dist = edt(segArr)
+        inv = edt(1 - segArr)
+        edtArr = dist - inv     # THIS ONE HAS POSITIVE VALUES INSIDE FOREGROUND, NEGATIVE OUTSIDE
+        absMax = np.max(np.abs(edtArr))
+        normArr = edtArr / absMax
+
+        dstPath = os.path.join(outputDir, f"{patientID}_0000.nii.gz")
+        mri1 = os.path.join(corruptedInputFolder, f"{patientID}_0_0001.nii.gz")
+        dst1 = os.path.join(outputDir, f"{patientID}_0001.nii.gz")
+        mri2 = os.path.join(corruptedInputFolder, f"{patientID}_0_0002.nii.gz")
+        dst2 = os.path.join(outputDir, f"{patientID}_0002.nii.gz")
+
+        WriteBinaryArrayToFile(normArr, dstPath, segImg.GetOrigin(), segImg.GetSpacing(), segImg.GetDirection())
+        shutil.copy(mri1, dst1)
+        shutil.copy(mri2, dst2)
+
+        print(f"Done making channels for {patientID}")
+
+    return outputDir
 
 def main():
     # generateSegmentations()
