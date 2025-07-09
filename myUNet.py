@@ -1,50 +1,34 @@
 import torch
-from dynamic_network_architectures.architectures.unet import PlainConvUNet
-from myTransformer import MyTransformer, AttentionPool, ClassifierHead
+from myTransformer import MyTransformer, ClassifierHead
 
 class myUNet(torch.nn.Module):
     def __init__(self, 
-                 pretrainedModelArch: PlainConvUNet,
                  inChannels: int,
                  expectedChannels: list[int], 
                  expectedStride: list[int],
-                 pretrainedModelPath: str = None,
                  ):
         super().__init__()
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        if pretrainedModelPath is not None:
-            stateDict = torch.load(pretrainedModelPath, map_location='cpu', weights_only=False)['network_weights']
+        p_split = 4
+        n_heads = 16
+        self.encoder = MyTransformer(expectedChannels, expectedStride, inChannels, p_split, num_heads=n_heads)
+        self.classifier = ClassifierHead(dim=expectedChannels[-1], metadata_d=n_heads)
 
-            # Load only decoder weights
-            decoderStateDict = {k.replace("decoder.", ""): v for k, v in stateDict.items() if "decoder" in k}
-            pretrainedModelArch.decoder.load_state_dict(decoderStateDict, strict=False)
-
-        self.encoder = MyTransformer(expectedChannels, expectedStride, inChannels)
-        self.decoder = pretrainedModelArch.decoder
-        self.classifier = torch.nn.Sequential(
-            AttentionPool(dim=expectedChannels[-1], heads=4),
-            ClassifierHead(dim=expectedChannels[-1]),
-        )
-
-        self.ret = "all"
+        self.ret = "logits"
 
     def forward(self, x: torch.Tensor, metadata: list = None):
         B = x.shape[0]
         imgShape = x.shape[2:]
-        features, skips, transformer_tokens = self.encoder(x, metadata)
-        skips[-1] = features
-        segOut = self.decoder(skips)
-
-        if self.ret == "seg":
-            return segOut
-
+        transformer_tokens = self.encoder(x, metadata)
+        # print("transformer out shape:", transformer_tokens.shape)
         clsOut = self.classifier(transformer_tokens)
+        # print("cls Out shape:", clsOut.shape)
 
-        if self.ret == "all":
-            return features, segOut, clsOut
-        elif self.ret == "cls":
+        if self.ret == 'logits':
+            return clsOut
+
+        if self.ret == 'binary':
             clsOut = torch.sigmoid(clsOut)     # activate before sending to "segmentation"
             filled = []
             # print("x shape:", x.shape)

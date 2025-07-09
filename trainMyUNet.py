@@ -8,7 +8,6 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import _LRScheduler
 from MAMAMIA.nnUNet.nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from MAMAMIA.nnUNet.nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-from torchjd.aggregation import UPGrad
 from myUNet import myUNet
 
 writer = None
@@ -98,7 +97,6 @@ def setupTrainer(plansJSONPath: str,
                  fold: int, 
                  datasetJSONPath: str, 
                  device: torch.device,
-                 pretrainedModelPath: str = None,
                  tag: str = "") -> nnUNetTrainer:
     
     with open(plansJSONPath, 'r', encoding="utf-8") as fp:
@@ -113,23 +111,20 @@ def setupTrainer(plansJSONPath: str,
         nInChannels = len(datasetInfo["channel_names"])
 
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device, tag)
-    trainer.num_iterations_per_epoch = 200
-    trainer.num_val_iterations_per_epoch = 50
-    trainer.num_epochs = 1000
-    trainer.initial_lr = 2e-5
+    trainer.enable_deep_supervision = False
+    trainer.num_iterations_per_epoch = 500
+    trainer.num_val_iterations_per_epoch = 200
+    trainer.num_epochs = 300
+    trainer.initial_lr = 1e-4
     trainer.initialize()
+    trainer.set_deep_supervision_enabled = lambda _: _
+    trainer.grad_scaler = None
 
-    model = myUNet(trainer.network, nInChannels, expectedChannels, expectedStride, pretrainedModelPath).to(device)
+    model = myUNet(nInChannels, expectedChannels, expectedStride).to(device)
     trainer.network = model
 
     # change optimizer and scheduler
-    params = [
-        *model.encoder.parameters(),
-        *model.decoder.parameters(),
-        *model.classifier.parameters(),
-    ]
-    trainer.optimizer = torch.optim.AdamW(params, lr=trainer.initial_lr, weight_decay=1e-4)
-    trainer.aggregator = UPGrad()
+    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.initial_lr, weight_decay=1e-4)
 
     num_training_steps = trainer.num_epochs           # scheduler steps every epoch, not every batch
     num_warmup_steps = round(0.2 * num_training_steps)  # 20% warmup
@@ -140,12 +135,11 @@ def setupTrainer(plansJSONPath: str,
         warmup_steps=num_warmup_steps,
         cycle_steps=num_cycle_steps,
         max_lr=trainer.initial_lr,
-        min_lr=1e-10,
+        min_lr=1e-8,
         damping=0.8
     )
 
-    trainer.cls_loss = PCRLoss()
-    trainer.cls_loss_weight = 1e-3
+    trainer.loss = PCRLoss()
 
     trainer.disable_checkpointing = True    # we will do this manually
 
@@ -197,12 +191,12 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
             trainer.on_validation_epoch_end(val_outputs)
 
         if epoch % trainer.save_every == 0 and trainer.current_epoch != (trainer.num_epochs - 1):
-            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_latest_myUNet.pth'))
+            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_latest_myPCR.pth'))
 
         # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
         if trainer._best_ema is None or trainer.logger.my_fantastic_logging['ema_fg_dice'][-1] > trainer._best_ema:
-            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_best_myUNet.pth'))
-            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_latest_myUNet.pth'))
+            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_best_myPCR.pth'))
+            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_latest_myPCR.pth'))
 
         trainer.on_epoch_end()
 
@@ -230,37 +224,18 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
         plt.savefig(os.path.join(trainer.output_folder, 'pcr_progress.png'))
         plt.clf()
     
-    saveModel(trainer, os.path.join(trainer.output_folder, "checkpoint_final_myUNet.pth"))
+    saveModel(trainer, os.path.join(trainer.output_folder, "checkpoint_final_myPCR.pth"))
     trainer.on_train_end()
 
-def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = "./outputs", outputPathPCR: str = "./outputs_pcr"):
+def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPathPCR: str = "./outputs_pcr"):
     trainer.set_deep_supervision_enabled(False)
     state_dict = torch.load(state_dict_path, map_location=trainer.device, weights_only=False)['network_weights']
     trainer.network.load_state_dict(state_dict)
     trainer.network.eval()
-    trainer.network.ret = "seg"
 
-    predictor = nnUNetPredictor(tile_step_size=0.5, use_gaussian=True, use_mirroring=True,
-                                perform_everything_on_device=True, device=trainer.device, verbose=False,
-                                verbose_preprocessing=False, allow_tqdm=False)
-    predictor.manual_initialization(trainer.network, trainer.plans_manager, trainer.configuration_manager,
-                                    [state_dict], trainer.dataset_json, trainer.__class__.__name__,
-                                    trainer.inference_allowed_mirroring_axes)
     inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")       # THESE IMAGES ARE CROPPED
-
-    os.makedirs(outputPath, exist_ok=True)
-    ret = predictor.predict_from_files(
-        inputFolder,
-        outputPath
-    )
-
-    from score_task1 import doScoring
-    doScoring(os.path.dirname(outputPath))
-    import pdb
-    pdb.set_trace()
-
     # do pCR inference
-    trainer.network.ret = "cls"
+    trainer.network.ret = "binary"
     predictor = nnUNetPredictor(tile_step_size=1, use_gaussian=False, use_mirroring=False,
                                 perform_everything_on_device=True, device=trainer.device, verbose=False,
                                 verbose_preprocessing=False, allow_tqdm=False)
@@ -279,22 +254,22 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
 
 if __name__ == "__main__":
     writer = SummaryWriter()
-    datasetName = "Dataset104_cropped_3ch_breast"
+    datasetName = "Dataset200_global_local_4ch_breast"
+    # datasetName = 'Dataset104_cropped_3ch_breast'
     basepath = rf"{os.environ["nnUNet_preprocessed"]}/{datasetName}"
-    pretrainedModelPath = "nnunet_pretrained_weights_64_best.pth"
+    # pretrainedModelPath = "nnunet_pretrained_weights_64_best.pth"
     plansPath = rf"{basepath}/nnUNetPlans.json"
     datasetPath = rf"{basepath}/dataset.json"
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_joint_no_transpose_JD"
+    tag = "_pcr_transformer"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
                            datasetPath, 
                            device, 
-                           pretrainedModelPath, 
                            tag=tag)
     
     output_folder = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}"
@@ -313,5 +288,4 @@ if __name__ == "__main__":
     train(trainer)
     inference(trainer, 
               state_dict_path, 
-              outputPath=rf"{output_folder}/outputs/pred_segmentations_cropped",
               outputPathPCR=rf"{output_folder}/outputs/pred_PCR_cropped")

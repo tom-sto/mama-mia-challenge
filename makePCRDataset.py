@@ -157,9 +157,12 @@ def process_patient(patientID: str, clinical_df: pd.DataFrame, df: pd.DataFrame,
     sitk.WriteImage(postPatch, os.path.join(out_dir, f"{patientID.lower()}_0003.nii.gz"))
 
     pcrArr = np.ones(shape=PATCH_SIZE, dtype=int) * int(pcr_label)
-    sitk.WriteImage(
-        sitk.Cast(sitk.GetImageFromArray(pcrArr), sitk.sitkInt16), 
-        os.path.join(label_dir, f"{patientID.lower()}.nii.gz"))
+    pcrImg: sitk.Image = sitk.Cast(sitk.GetImageFromArray(pcrArr), sitk.sitkInt16)
+    pcrImg.SetDirection(resPreImg.GetDirection())
+    pcrImg.SetOrigin(resPreImg.GetOrigin())
+    pcrImg.SetSpacing(resPreImg.GetSpacing())
+
+    sitk.WriteImage(pcrImg, os.path.join(label_dir, f"{patientID.lower()}.nii.gz"))
 
     print(f"Finished processing {patientID} in {out_dir}")
     return patientID
