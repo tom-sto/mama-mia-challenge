@@ -36,6 +36,9 @@ def scorePCR(outputDir: str,
 
     out_df.to_csv(os.path.join(os.path.dirname(outputDir), 'pcr_scores.csv'), index=False)
 
+    out_df['pcr_pred'] = 0
+    out_df['correct'] = out_df['pcr_label'] == out_df['pcr_pred']
+
     print("Percentage of correct predictions:",
           out_df['correct'].mean() * 100, "%")
     groups = ['DUKE', 'ISPY1', 'ISPY2', 'NACT']
@@ -45,5 +48,47 @@ def scorePCR(outputDir: str,
     for group, accuracy in avg_accuracy.items():
         print(f"{group}: {accuracy * 100:.2f}%")
 
-if __name__ == "__main__": 
-    ...
+    # Calculate Specificity, Sensitivity, Recall, and Precision for each dataset group
+    # Include both Precision and Balanced Accuracy calculations
+    metrics = ['Specificity', 'Sensitivity', 'Precision', 'Balanced Accuracy']
+    results = {group: {metric: 0 for metric in metrics} for group in groups}
+
+    for group in groups:
+        group_df = out_df[out_df['patient_id'].str.contains(group, na=False)]
+        tp = ((group_df['pcr_pred'] == 1) & (group_df['pcr_label'] == 1)).sum()
+        tn = ((group_df['pcr_pred'] == 0) & (group_df['pcr_label'] == 0)).sum()
+        fp = ((group_df['pcr_pred'] == 1) & (group_df['pcr_label'] == 0)).sum()
+        fn = ((group_df['pcr_pred'] == 0) & (group_df['pcr_label'] == 1)).sum()
+
+        results[group]['Specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0
+        results[group]['Sensitivity'] = tp / (tp + fn) if (tp + fn) > 0 else 0
+        results[group]['Precision'] = tp / (tp + fp) if (tp + fp) > 0 else 0
+        results[group]['Balanced Accuracy'] = (results[group]['Sensitivity'] + results[group]['Specificity']) / 2
+
+    print("Metrics per group:")
+    for group, metrics in results.items():
+        print(f"{group}:")
+        for metric, value in metrics.items():
+            print(f"  {metric}: {value * 100:.2f}%")
+
+    # Calculate overall metrics for the full dataset
+    overall_metrics = ['Specificity', 'Sensitivity', 'Precision', 'Balanced Accuracy']
+    overall_results = {metric: 0 for metric in overall_metrics}
+
+    tp = ((out_df['pcr_pred'] == 1) & (out_df['pcr_label'] == 1)).sum()
+    tn = ((out_df['pcr_pred'] == 0) & (out_df['pcr_label'] == 0)).sum()
+    fp = ((out_df['pcr_pred'] == 1) & (out_df['pcr_label'] == 0)).sum()
+    fn = ((out_df['pcr_pred'] == 0) & (out_df['pcr_label'] == 1)).sum()
+
+    overall_results['Specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0
+    overall_results['Sensitivity'] = tp / (tp + fn) if (tp + fn) > 0 else 0
+    overall_results['Precision'] = tp / (tp + fp) if (tp + fp) > 0 else 0
+    overall_results['Balanced Accuracy'] = (overall_results['Sensitivity'] + overall_results['Specificity']) / 2
+
+    print("Overall metrics:")
+    for metric, value in overall_results.items():
+        print(f"  {metric}: {value * 100:.2f}%")
+
+if __name__ == "__main__":
+    predDir = r"nnUNet_results\Dataset200_global_local_4ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4_pcr_transformer\outputs\pred_PCR_cropped" 
+    scorePCR(predDir)
