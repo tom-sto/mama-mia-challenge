@@ -35,10 +35,9 @@ def scorePCR(outputDir: str,
         out_df = pd.concat([out_df, new_row], ignore_index=True)
 
     out_df.to_csv(os.path.join(os.path.dirname(outputDir), 'pcr_scores.csv'), index=False)
+    return out_df
 
-    out_df['pcr_pred'] = 0
-    out_df['correct'] = out_df['pcr_label'] == out_df['pcr_pred']
-
+def scoreFromDF(out_df: pd.DataFrame):
     print("Percentage of correct predictions:",
           out_df['correct'].mean() * 100, "%")
     groups = ['DUKE', 'ISPY1', 'ISPY2', 'NACT']
@@ -90,5 +89,7 @@ def scorePCR(outputDir: str,
         print(f"  {metric}: {value * 100:.2f}%")
 
 if __name__ == "__main__":
-    predDir = r"nnUNet_results\Dataset200_global_local_4ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4_pcr_transformer\outputs\pred_PCR_cropped" 
-    scorePCR(predDir)
+    predDir = "/mnt/storageSSD/MAMA-MIA/mama-mia-challenge/nnUNet_results/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_4_transformer_joint_pos_weight_and_more_augmentations/outputs" 
+    # df = scorePCR(predDir)
+    df = pd.read_csv(os.path.join(predDir, 'pcr_scores.csv'))
+    scoreFromDF(df)
