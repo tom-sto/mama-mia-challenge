@@ -6,13 +6,14 @@ class myUNet(torch.nn.Module):
                  inChannels: int,
                  expectedChannels: list[int], 
                  expectedStride: list[int],
+                 n_heads: int = 16,
+                 n_layers: int = 8,
                  ):
         super().__init__()
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         p_split = 4
-        n_heads = 16
-        self.encoder = MyTransformer(expectedChannels, expectedStride, inChannels, p_split, num_heads=n_heads)
+        self.encoder = MyTransformer(expectedChannels, expectedStride, inChannels, p_split, transformer_depth=n_layers, num_heads=n_heads)
         self.classifier = ClassifierHead(dim=expectedChannels[-1], metadata_d=n_heads)
 
         self.ret = "logits"

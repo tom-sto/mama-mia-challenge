@@ -5,3 +5,4 @@
 | Predict 0 for all (baseline) | 0.6703 | 0.7910 | 0.6488 | 0.8235 | 0.6960 | July 1 |
 | Joint-task epoch ~220 | 0.6703 | 0.7463 | 0.6488 | 0.8235 | 0.6863 | July 1 | 3 false positives in ISPY1, the rest are false negative
 | Joint-task epoch (end of training) | 0.6703 | 0.7612 | 0.6336 | 0.7647 | 0.6703 | July 5 | 0.4242 precision, 0.15 recall
+| PCR-transformer (overfit) | 0.6703 | 0.7463 | 0.6336 | 0.6471 | 0.6699 | July 10 | 199 TN, 87 FN, 6 TP, 14 FP --> 0.3 Precision, 0.06 recall

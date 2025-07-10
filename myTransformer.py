@@ -74,7 +74,7 @@ class ClassifierHead(nn.Module):
             nn.Linear(dim + metadata_d, 128),
             nn.ReLU(),
             # maybe dropout
-            nn.Dropout(),
+            nn.Dropout(0.2),
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, 1)
@@ -91,8 +91,8 @@ class MyTransformer(nn.Module):
         strides,
         in_channels,
         p_split,
-        transformer_depth=8,
-        num_heads=16,
+        transformer_depth,
+        num_heads,
     ):
         super().__init__()
 
@@ -128,7 +128,7 @@ class MyTransformer(nn.Module):
             nhead=num_heads,
             dim_feedforward=(self.emb_dim + nMetadataOutFeatures) * 4,
             batch_first=True,
-            dropout=0.2
+            dropout=0.3
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_depth)
 

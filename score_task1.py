@@ -102,7 +102,7 @@ def doScoring(inpDir: str, corrupted: bool = False):
     evaluateAcrossDatasets(inpDir)
 
 if __name__ == "__main__":
-    inpDir = "./nnUNet_results/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_4_transformer_joint_pos_weight_and_more_augmentations/outputs"
+    inpDir = r"nnUNet_results\Dataset104_cropped_3ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4_transformer_128_skips"
     # doUncropping(inpDir)
-    generate_scores(data_dir, inpDir)
+    # generate_scores(data_dir, inpDir)
     evaluateAcrossDatasets(inpDir)

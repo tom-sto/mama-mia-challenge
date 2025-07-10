@@ -120,7 +120,10 @@ def setupTrainer(plansJSONPath: str,
     trainer.set_deep_supervision_enabled = lambda _: _
     trainer.grad_scaler = None
 
-    model = myUNet(nInChannels, expectedChannels, expectedStride).to(device)
+    nHeads = 8
+    nLayers = 8
+
+    model = myUNet(nInChannels, expectedChannels, expectedStride, nHeads, nLayers).to(device)
     trainer.network = model
 
     # change optimizer and scheduler
@@ -265,7 +268,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_pcr_transformer_more_dropout"
+    tag = "_pcr_transformer_more_reg_less_transformer"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
@@ -273,8 +276,8 @@ if __name__ == "__main__":
                            device, 
                            tag=tag)
     
-    output_folder = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}"
-    state_dict_path = rf"{output_folder}/checkpoint_best_myUNet.pth"
+    output_folder = rf"{os.environ["nnUNet_results"]}/{datasetName}/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}"
+    state_dict_path = rf"{output_folder}/checkpoint_best_myPCR.pth"
     
     # lr = []
     # for epoch in range(trainer.num_epochs):
