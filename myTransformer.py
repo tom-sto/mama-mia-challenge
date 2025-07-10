@@ -44,15 +44,14 @@ class DeepPatchEmbed3D(nn.Module):
         self.encoder = nn.ModuleList([])
         self.decoder = nn.ModuleList([])
 
-        groups = [max(min(8, ch // 16), 1) for ch in channels]
-        print(f"Using groups: {groups} for channels: {channels}")
-        
         for i in range(len(channels) - 1):
             block = nn.Sequential(
-                nn.GroupNorm(num_groups=groups[i], num_channels=channels[i]),
+                nn.BatchNorm3d(channels[i]),
                 nn.Conv3d(channels[i], channels[i], kernel_size=3, padding=1) if i == 0 else nn.Identity(),
                 nn.Conv3d(channels[i], channels[i + 1], kernel_size=3, padding=1),
+                nn.BatchNorm3d(channels[i+1]),
                 nn.ReLU(inplace=True),
+                nn.Dropout3d(p=0.2) if i == len(channels) - 2 else nn.Identity(),
                 nn.MaxPool3d(kernel_size=3, stride=strides[i], padding=1)
             )
             self.encoder.append(block)
@@ -60,7 +59,7 @@ class DeepPatchEmbed3D(nn.Module):
         # Create decoder blocks (mirrored but reinitialized)
         for i in reversed(range(len(channels) - 1)):
             block = nn.Sequential(
-                nn.GroupNorm(num_groups=groups[i + 1], num_channels=channels[i + 1]),
+                nn.BatchNorm3d(channels[i + 1]),
                 nn.Conv3d(channels[i + 1], channels[i], kernel_size=3, padding=1),
                 nn.ReLU(inplace=True),
                 nn.ConvTranspose3d(channels[i], channels[i], kernel_size=3, stride=strides[i], padding=1, output_padding=1)
@@ -101,7 +100,10 @@ class ClassifierHead(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.fc = nn.Sequential(
-            nn.Linear(dim, 64),
+            nn.Linear(dim, 128),
+            nn.ReLU(),
+            # maybe dropout
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, 1)
         )
@@ -124,13 +126,13 @@ class MyTransformer(nn.Module):
         self.inChannels = in_channels
         self.emb_dim = channels[-1]
 
-        self.patch_embed = DeepPatchEmbed3D(channels, in_channels, strides)
-        self.pos_embed = nn.Parameter(torch.randn((self.emb_dim,)), requires_grad=True)  # learnable position embedding
-        self.skip_weights = nn.Parameter(torch.ones(len(self.patch_embed.decoder)) * 0.5, requires_grad=True)  # learnable skip connection weights
-
         nMetadataInFeatures = 7             # 1 for age (linear), 2 for menopausal status (one-hot), 4 for breast density (one-hot)
         nMetadataOutFeatures = num_heads    # needs to be divisible by num_heads
         self.metadataEmbed = nn.Linear(nMetadataInFeatures, nMetadataOutFeatures)
+
+        self.patch_embed = DeepPatchEmbed3D(channels, in_channels, strides)
+        self.pos_embed = nn.Parameter(torch.randn((self.emb_dim + nMetadataOutFeatures,)))  # learnable position embedding
+        self.skip_weights = nn.Parameter(torch.ones(len(self.patch_embed.decoder)) * 0.5)  # learnable skip connection weights
 
         ageMin = 21
         ageMax = 77
@@ -149,8 +151,7 @@ class MyTransformer(nn.Module):
             d_model=self.emb_dim + nMetadataOutFeatures,
             nhead=num_heads,
             dim_feedforward=(self.emb_dim + nMetadataOutFeatures) * 4,
-            batch_first=True,
-            dropout=0.2
+            batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_depth)
 
@@ -165,7 +166,7 @@ class MyTransformer(nn.Module):
                 nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
-            elif isinstance(module, nn.GroupNorm):
+            elif isinstance(module, nn.BatchNorm3d):
                 nn.init.constant_(module.weight, 1)
                 nn.init.constant_(module.bias, 0)
 
@@ -197,7 +198,6 @@ class MyTransformer(nn.Module):
         # print("patch embedded x grad_fn:", x.grad_fn)
         # for i, s in enumerate(skips):
         #     print(f"Skip {i} grad_fn: {s.grad_fn}")
-        x = x + self.pos_embed
 
         # print("Embedded x shape:", x.shape)
 
@@ -219,6 +219,7 @@ class MyTransformer(nn.Module):
             metadata_emb[idx] += concat.repeat(N, 1)  # [B, N, nMetadataOutFeatures]
 
         x = torch.cat((x, metadata_emb), dim=-1)  # [B, N, emb_dim + nMetadataOutFeatures]
+        x = x + self.pos_embed
 
         tf_skips: list[torch.Tensor] = []
         for layer in self.transformer.layers:

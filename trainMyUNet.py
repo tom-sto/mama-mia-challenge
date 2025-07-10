@@ -116,24 +116,24 @@ def setupTrainer(plansJSONPath: str,
     trainer.num_iterations_per_epoch = 200
     trainer.num_val_iterations_per_epoch = 50
     trainer.num_epochs = 1000
-    trainer.initial_lr = 2e-5
+    trainer.initial_lr = 5e-6
     trainer.initialize()
 
     model = myUNet(trainer.network, nInChannels, expectedChannels, expectedStride, pretrainedModelPath).to(device)
     trainer.network = model
 
     # change optimizer and scheduler
-    params = [
-        *model.encoder.parameters(),
-        *model.decoder.parameters(),
-        *model.classifier.parameters(),
-    ]
-    trainer.optimizer = torch.optim.AdamW(params, lr=trainer.initial_lr, weight_decay=1e-4)
+    # trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.initial_lr, weight_decay=1e-4)
+    trainer.optimizer = torch.optim.AdamW([
+        {'params': model.encoder.parameters(), 'lr': trainer.initial_lr},
+        {'params': model.decoder.parameters(), 'lr': trainer.initial_lr * 0.1},
+        {'params': model.classifier.parameters(), 'lr': trainer.initial_lr * 2.},
+    ], weight_decay=1e-4)
     trainer.aggregator = UPGrad()
 
     num_training_steps = trainer.num_epochs           # scheduler steps every epoch, not every batch
-    num_warmup_steps = round(0.2 * num_training_steps)  # 20% warmup
-    num_cycle_steps = round(0.2 * num_training_steps) + 1
+    num_warmup_steps = round(0.1 * num_training_steps)  # 10% warmup
+    num_cycle_steps = round(0.45 * num_training_steps) + 1
 
     trainer.lr_scheduler = WarmupCosineAnnealingWithRestarts(
         trainer.optimizer,
@@ -141,11 +141,10 @@ def setupTrainer(plansJSONPath: str,
         cycle_steps=num_cycle_steps,
         max_lr=trainer.initial_lr,
         min_lr=1e-10,
-        damping=0.8
+        damping=0.5
     )
 
     trainer.cls_loss = PCRLoss()
-    trainer.cls_loss_weight = 1e-3
 
     trainer.disable_checkpointing = True    # we will do this manually
 
@@ -288,7 +287,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_joint_no_transpose_JD"
+    tag = "_transformer_joint_JD_more_regularization"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
