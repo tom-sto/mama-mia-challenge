@@ -115,7 +115,7 @@ def setupTrainer(plansJSONPath: str,
     trainer.num_iterations_per_epoch = 500
     trainer.num_val_iterations_per_epoch = 200
     trainer.num_epochs = 300
-    trainer.initial_lr = 1e-4
+    trainer.initial_lr = 5e-7
     trainer.initialize()
     trainer.set_deep_supervision_enabled = lambda _: _
     trainer.grad_scaler = None
@@ -124,18 +124,18 @@ def setupTrainer(plansJSONPath: str,
     trainer.network = model
 
     # change optimizer and scheduler
-    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.initial_lr, weight_decay=1e-4)
+    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.initial_lr, weight_decay=1e-2)
 
     num_training_steps = trainer.num_epochs           # scheduler steps every epoch, not every batch
-    num_warmup_steps = round(0.2 * num_training_steps)  # 20% warmup
-    num_cycle_steps = round(0.2 * num_training_steps) + 1
+    num_warmup_steps = round(0.1 * num_training_steps)  # 10% warmup
+    num_cycle_steps = num_training_steps
 
     trainer.lr_scheduler = WarmupCosineAnnealingWithRestarts(
         trainer.optimizer,
         warmup_steps=num_warmup_steps,
         cycle_steps=num_cycle_steps,
         max_lr=trainer.initial_lr,
-        min_lr=1e-8,
+        min_lr=1e-10,
         damping=0.8
     )
 
@@ -155,6 +155,7 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
 
     cls_losses = []
     pcr_percentages = []
+    bestAccuracy = 0.
     import matplotlib.pyplot as plt
 
     for epoch in range(trainer.current_epoch, trainer.num_epochs):
@@ -193,10 +194,10 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
         if epoch % trainer.save_every == 0 and trainer.current_epoch != (trainer.num_epochs - 1):
             saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_latest_myPCR.pth'))
 
-        # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
-        if trainer._best_ema is None or trainer.logger.my_fantastic_logging['ema_fg_dice'][-1] > trainer._best_ema:
+        if pcr_percentages[-1] > bestAccuracy:
             saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_best_myPCR.pth'))
             saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_latest_myPCR.pth'))
+            bestAccuracy = pcr_percentages[-1]
 
         trainer.on_epoch_end()
 
@@ -264,7 +265,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_pcr_transformer"
+    tag = "_pcr_transformer_more_dropout"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 

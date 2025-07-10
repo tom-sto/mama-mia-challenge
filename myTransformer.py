@@ -47,7 +47,9 @@ class DeepPatchEmbed3D(nn.Module):
                 nn.BatchNorm3d(num_features=channels[i]),
                 nn.Conv3d(channels[i], channels[i], kernel_size=3, padding=1) if i == 0 else nn.Identity(),
                 nn.Conv3d(channels[i], channels[i + 1], kernel_size=3, padding=1),
+                nn.BatchNorm3d(num_features=channels[i+1]),
                 nn.ReLU(inplace=True),
+                nn.Dropout3d(0.3) if i == len(channels) - 2 else nn.Identity(),
                 nn.MaxPool3d(kernel_size=3, stride=strides[i], padding=1)
             )
             self.encoder.append(block)
@@ -61,7 +63,7 @@ class DeepPatchEmbed3D(nn.Module):
 
         _, E, X, Y, Z = x.shape
         x = x.permute(0, 2, 3, 4, 1)
-        x = x.reshape(B, N*X*Y*Z, E)
+        x = x.reshape(B, N*X*Y*Z, E)        # each token represents one small patch region with an E-dim embedding
 
         return x, (B, N, E, X, Y, Z)
 
@@ -69,8 +71,10 @@ class ClassifierHead(nn.Module):
     def __init__(self, dim, metadata_d):
         super().__init__()
         self.fc = nn.Sequential(
-            nn.Linear(dim + metadata_d , 128),
+            nn.Linear(dim + metadata_d, 128),
             nn.ReLU(),
+            # maybe dropout
+            nn.Dropout(),
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, 1)
