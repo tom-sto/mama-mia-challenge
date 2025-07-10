@@ -112,8 +112,8 @@ def setupTrainer(plansJSONPath: str,
 
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device, tag)
     trainer.enable_deep_supervision = False
-    trainer.num_iterations_per_epoch = 500
-    trainer.num_val_iterations_per_epoch = 200
+    trainer.num_iterations_per_epoch = 200
+    trainer.num_val_iterations_per_epoch = 60
     trainer.num_epochs = 300
     trainer.initial_lr = 5e-7
     trainer.initialize()
@@ -121,13 +121,13 @@ def setupTrainer(plansJSONPath: str,
     trainer.grad_scaler = None
 
     nHeads = 8
-    nLayers = 8
+    nLayers = 6
 
     model = myUNet(nInChannels, expectedChannels, expectedStride, nHeads, nLayers).to(device)
     trainer.network = model
 
     # change optimizer and scheduler
-    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.initial_lr, weight_decay=1e-2)
+    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.initial_lr, weight_decay=1e-4)
 
     num_training_steps = trainer.num_epochs           # scheduler steps every epoch, not every batch
     num_warmup_steps = round(0.1 * num_training_steps)  # 10% warmup
@@ -268,7 +268,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_pcr_transformer_more_reg_less_transformer"
+    tag = "_pcr_transformer_8heads_6layers"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 

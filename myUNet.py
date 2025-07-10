@@ -6,8 +6,8 @@ class myUNet(torch.nn.Module):
                  inChannels: int,
                  expectedChannels: list[int], 
                  expectedStride: list[int],
-                 n_heads: int = 16,
-                 n_layers: int = 8,
+                 n_heads: int,
+                 n_layers: int,
                  ):
         super().__init__()
 
