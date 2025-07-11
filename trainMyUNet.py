@@ -127,7 +127,10 @@ def setupTrainer(plansJSONPath: str,
     trainer.network = model
 
     # change optimizer and scheduler
-    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.initial_lr, weight_decay=1e-4)
+    trainer.optimizer = torch.optim.AdamW([
+        {'params': model.encoder.parameters(), 'lr': trainer.initial_lr, 'weight_decay': 1e-3},
+        {'params': model.classifier.parameters(), 'lr': trainer.initial_lr * 2e3, 'weight_decay': 1e-5}
+    ])
 
     num_training_steps = trainer.num_epochs           # scheduler steps every epoch, not every batch
     num_warmup_steps = round(0.1 * num_training_steps)  # 10% warmup
@@ -232,28 +235,63 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
     trainer.on_train_end()
 
 def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPathPCR: str = "./outputs_pcr"):
+    import SimpleITK as sitk
+    import pandas as pd
     trainer.set_deep_supervision_enabled(False)
     state_dict = torch.load(state_dict_path, map_location=trainer.device, weights_only=False)['network_weights']
     trainer.network.load_state_dict(state_dict)
     trainer.network.eval()
+    trainer.network.float()
 
     inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")       # THESE IMAGES ARE CROPPED
     # do pCR inference
-    trainer.network.ret = "binary"
-    predictor = nnUNetPredictor(tile_step_size=1, use_gaussian=False, use_mirroring=False,
-                                perform_everything_on_device=True, device=trainer.device, verbose=False,
-                                verbose_preprocessing=False, allow_tqdm=False)
-    predictor.manual_initialization(trainer.network, trainer.plans_manager, trainer.configuration_manager,
-                                    [state_dict], trainer.dataset_json, trainer.__class__.__name__,
-                                    trainer.inference_allowed_mirroring_axes)
-    os.makedirs(outputPathPCR, exist_ok=True)
-    ret = predictor.predict_from_files(
-        inputFolder,
-        outputPathPCR
-    )
+    trainer.network.ret = "probability"
+    # predictor = nnUNetPredictor(tile_step_size=1, use_gaussian=False, use_mirroring=False,
+    #                             perform_everything_on_device=True, device=trainer.device, verbose=False,
+    #                             verbose_preprocessing=False, allow_tqdm=False)
+    # predictor.manual_initialization(trainer.network, trainer.plans_manager, trainer.configuration_manager,
+    #                                 [state_dict], trainer.dataset_json, trainer.__class__.__name__,
+    #                                 trainer.inference_allowed_mirroring_axes)
+    # os.makedirs(outputPathPCR, exist_ok=True)
+    # ret = predictor.predict_from_files(
+    #     inputFolder,
+    #     outputPathPCR
+    # )
+    out_df = pd.DataFrame(columns=['patient_id', 'pcr_prob'])
+    patientIDS_seen = []
+    for imgName in os.listdir(inputFolder):
+        patientID = imgName.split('.')[0][:-5]
+        if patientID in patientIDS_seen:
+            continue
+        patientIDS_seen.append(patientID)
+        print(f"Predicting for patient {patientID}")
+        
+        arrs = []
+        for i in range(4):
+            imgPath = os.path.join(inputFolder, f"{patientID}_000{i}.nii.gz")
+
+            arr = sitk.GetArrayFromImage(sitk.ReadImage(imgPath))
+            arr = torch.from_numpy(arr).unsqueeze(0)
+            arrs.append(arr)
+
+        with torch.autocast(trainer.device.type):
+            arr = torch.cat(arrs)
+            assert len(arr.shape) == 4, f'Expected shape (C, X, Y, Z), got shape {arr.shape}'
+            arr = arr.unsqueeze(0).to(trainer.device).float()
+            p: torch.Tensor = trainer.network(arr)
+
+        data = pd.DataFrame({
+            'patient_id': [patientID.upper()],
+            'pcr_prob': [p.item()],
+        })
+        out_df = pd.concat([out_df, data], ignore_index=True)
+
+    pred_path = os.path.join(os.path.dirname(outputPathPCR), 'pcr_predictions.csv')
+    print(f"Saving to {pred_path}")
+    out_df.to_csv(pred_path, index=False)
 
     from predictPCR import scorePCR
-    scorePCR(outputPathPCR)
+    scorePCR(pred_path)
     
 
 if __name__ == "__main__":
@@ -268,7 +306,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_pcr_transformer_8heads_6layers"
+    tag = "_pcr_transformer_more_classifier"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 

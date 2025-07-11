@@ -71,9 +71,12 @@ class ClassifierHead(nn.Module):
     def __init__(self, dim, metadata_d):
         super().__init__()
         self.fc = nn.Sequential(
-            nn.Linear(dim + metadata_d, 128),
+            nn.Linear(dim + metadata_d, 256),
             nn.ReLU(),
-            # maybe dropout
+            nn.LayerNorm(256),
+            nn.Dropout(0.2),
+            nn.Linear(256, 128),
+            nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(128, 64),
             nn.ReLU(),

@@ -28,6 +28,9 @@ class myUNet(torch.nn.Module):
 
         if self.ret == 'logits':
             return clsOut
+        
+        if self.ret == 'probability':
+            return torch.sigmoid(clsOut)
 
         if self.ret == 'binary':
             clsOut = torch.sigmoid(clsOut)     # activate before sending to "segmentation"
