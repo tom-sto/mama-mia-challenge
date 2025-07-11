@@ -73,11 +73,10 @@ class ClassifierHead(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(dim + metadata_d, 256),
             nn.ReLU(),
-            nn.LayerNorm(256),
-            nn.Dropout(0.2),
+            nn.BatchNorm1d(256),
+            nn.Dropout(),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Dropout(0.2),
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, 1)
