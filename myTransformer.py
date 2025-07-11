@@ -100,12 +100,15 @@ class ClassifierHead(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.fc = nn.Sequential(
-            nn.Linear(dim, 128),
+            nn.Linear(dim, 256),
             nn.ReLU(),
-            # maybe dropout
-            nn.Linear(128, 64),
+            nn.BatchNorm1d(256),
+            nn.Dropout(),
+            nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(64, 1)
+            nn.Linear(128, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
         )
 
     def forward(self, x):

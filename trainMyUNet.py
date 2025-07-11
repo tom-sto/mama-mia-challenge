@@ -115,19 +115,23 @@ def setupTrainer(plansJSONPath: str,
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device, tag)
     trainer.num_iterations_per_epoch = 200
     trainer.num_val_iterations_per_epoch = 50
-    trainer.num_epochs = 1000
-    trainer.initial_lr = 5e-6
+    trainer.num_epochs = 500
+    trainer.initial_lr = 5e-7
     trainer.initialize()
 
     model = myUNet(trainer.network, nInChannels, expectedChannels, expectedStride, pretrainedModelPath).to(device)
     trainer.network = model
 
+    non_transformer_params = [
+        param for name, param in model.encoder.named_parameters()
+        if not name.startswith("transformer")
+    ]
     # change optimizer and scheduler
-    # trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.initial_lr, weight_decay=1e-4)
     trainer.optimizer = torch.optim.AdamW([
-        {'params': model.encoder.parameters(), 'lr': trainer.initial_lr},
-        {'params': model.decoder.parameters(), 'lr': trainer.initial_lr * 0.1},
-        {'params': model.classifier.parameters(), 'lr': trainer.initial_lr * 2.},
+        {'params': non_transformer_params, 'lr': trainer.initial_lr * 20},
+        {'params': model.encoder.transformer.parameters(), 'lr': trainer.initial_lr},
+        {'params': model.decoder.parameters(), 'lr': trainer.initial_lr * 10},
+        {'params': model.classifier.parameters(), 'lr': trainer.initial_lr * 2e2},
     ], weight_decay=1e-4)
     trainer.aggregator = UPGrad()
 
@@ -147,6 +151,7 @@ def setupTrainer(plansJSONPath: str,
     trainer.cls_loss = PCRLoss()
 
     trainer.disable_checkpointing = True    # we will do this manually
+    trainer.save_every = 5
 
     return trainer
 
@@ -160,6 +165,9 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
 
     cls_losses = []
     pcr_percentages = []
+    pcr_bal_accuracy = []
+    bestAccuracy = 0.
+    bestJoint = 0.
     import matplotlib.pyplot as plt
 
     for epoch in range(trainer.current_epoch, trainer.num_epochs):
@@ -185,14 +193,17 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
             val_outputs = []
             cls_losses_avg = []
             pcr_preds_avg = []
+            pcr_bal_avg = []
             for batch_id in range(trainer.num_val_iterations_per_epoch):
-                val_out, cls_loss, pcr_perc = trainer.validation_step(next(trainer.dataloader_val))
+                val_out, cls_loss, pcr_perc, bal_acc = trainer.validation_step(next(trainer.dataloader_val))
                 val_outputs.append(val_out)
                 cls_losses_avg.append(cls_loss)
                 pcr_preds_avg.append(pcr_perc)
+                pcr_bal_avg.append(bal_acc)
 
             cls_losses.append(sum(cls_losses_avg) / len(cls_losses_avg))
             pcr_percentages.append(sum(pcr_preds_avg) / len(pcr_preds_avg))
+            pcr_bal_accuracy.append(sum(pcr_bal_avg) / len(pcr_bal_avg))
             trainer.on_validation_epoch_end(val_outputs)
 
         if epoch % trainer.save_every == 0 and trainer.current_epoch != (trainer.num_epochs - 1):
@@ -200,9 +211,19 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
 
         # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
         if trainer._best_ema is None or trainer.logger.my_fantastic_logging['ema_fg_dice'][-1] > trainer._best_ema:
-            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_best_myUNet.pth'))
-            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_latest_myUNet.pth'))
+            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_best_for_seg.pth'))
 
+        if pcr_bal_accuracy[-1] > bestAccuracy:
+            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_best_for_PCR.pth'))
+            bestAccuracy = pcr_bal_accuracy[-1]
+            trainer.print_to_log_file(f"Best Balanced Accuracy {bestAccuracy}! Saving best model on epoch {epoch}")
+
+        jointAcc = pcr_bal_accuracy[-1] + trainer.logger.my_fantastic_logging['ema_fg_dice'][-1]
+        if jointAcc > bestJoint:
+            saveModel(trainer, os.path.join(trainer.output_folder, 'checkpoint_best_joint.pth'))
+            bestJoint = jointAcc
+            trainer.print_to_log_file(f"Best Joint Accuracy {bestJoint}! Saving best model on epoch {epoch}")
+        
         trainer.on_epoch_end()
 
         # fix the sizing of the plots with dual y-axes
@@ -210,6 +231,7 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
 
         # Plot PCR Accuracy on the left y-axis
         ax1.plot(pcr_percentages, label='PCR Accuracy', color='blue')
+        ax1.plot(pcr_bal_accuracy, label='Balanced Accuracy', color='green')
         ax1.set_xlabel('Epoch', fontsize=12)
         ax1.set_ylabel('PCR Accuracy', fontsize=12, color='blue')
         ax1.tick_params(axis='y', labelcolor='blue', labelsize=10)
@@ -223,6 +245,7 @@ def train(trainer: nnUNetTrainer, continue_training: bool = False):
 
         # Add a title and adjust layout
         plt.title('PCR Prediction Accuracy and BCE Loss Over Epochs', fontsize=14)
+        fig.legend(loc='upper left', bbox_to_anchor=(0.1, 0.9), bbox_transform=ax1.transAxes, fontsize=10)
         fig.tight_layout()  # Adjust layout to prevent clipping
 
         # Save the plot
@@ -287,7 +310,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_joint_JD_more_regularization"
+    tag = "_transformer_joint_JD_last_try"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 

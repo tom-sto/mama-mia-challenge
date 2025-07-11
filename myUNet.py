@@ -21,7 +21,7 @@ class myUNet(torch.nn.Module):
             decoderStateDict = {k.replace("decoder.", ""): v for k, v in stateDict.items() if "decoder" in k}
             pretrainedModelArch.decoder.load_state_dict(decoderStateDict, strict=False)
 
-        self.encoder = MyTransformer(expectedChannels, expectedStride, inChannels)
+        self.encoder = MyTransformer(expectedChannels, expectedStride, inChannels, num_heads=8)
         self.decoder = pretrainedModelArch.decoder
         self.classifier = torch.nn.Sequential(
             AttentionPool(dim=expectedChannels[-1], heads=4),
