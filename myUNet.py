@@ -1,6 +1,6 @@
 import torch
 from dynamic_network_architectures.architectures.unet import PlainConvUNet
-from myTransformer import MyTransformer, AttentionPool, ClassifierHead
+from myTransformer import MyTransformer, ClassifierHead
 
 class myUNet(torch.nn.Module):
     def __init__(self, 
@@ -23,10 +23,7 @@ class myUNet(torch.nn.Module):
 
         self.encoder = MyTransformer(expectedChannels, expectedStride, inChannels, num_heads=8)
         self.decoder = pretrainedModelArch.decoder
-        self.classifier = torch.nn.Sequential(
-            AttentionPool(dim=expectedChannels[-1], heads=4),
-            ClassifierHead(dim=expectedChannels[-1]),
-        )
+        self.classifier = ClassifierHead(dim=expectedChannels[-1])
 
         self.ret = "all"
 

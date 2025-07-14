@@ -84,18 +84,6 @@ class DeepPatchEmbed3D(nn.Module):
 
         return x, skips, (B, N, E, X, Y, Z)
 
-class AttentionPool(nn.Module):
-    def __init__(self, dim, heads=4):
-        super().__init__()
-        self.q = nn.Parameter(torch.randn(1, 1, dim))  # Learnable query token
-        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
-
-    def forward(self, x):
-        B = x.size(0)
-        q = self.q.expand(B, -1, -1)  # (B, 1, dim)
-        attn_out, _ = self.attn(q, x, x)  # Attend to transformer tokens
-        return attn_out.squeeze(1)       # (B, dim)
-
 class ClassifierHead(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -111,7 +99,8 @@ class ClassifierHead(nn.Module):
             nn.Linear(32, 1)
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):
+        x = x.flatten(1)
         return self.fc(x) # (B, 1)
 
 class MyTransformer(nn.Module):
@@ -134,6 +123,7 @@ class MyTransformer(nn.Module):
         self.metadataEmbed = nn.Linear(nMetadataInFeatures, nMetadataOutFeatures)
 
         self.patch_embed = DeepPatchEmbed3D(channels, in_channels, strides)
+        self.cls_token = nn.Parameter(torch.randn((1, 1, self.emb_dim + nMetadataOutFeatures)))
         self.pos_embed = nn.Parameter(torch.randn((self.emb_dim + nMetadataOutFeatures,)))  # learnable position embedding
         self.skip_weights = nn.Parameter(torch.ones(len(self.patch_embed.decoder)) * 0.5)  # learnable skip connection weights
 
@@ -222,6 +212,11 @@ class MyTransformer(nn.Module):
             metadata_emb[idx] += concat.repeat(N, 1)  # [B, N, nMetadataOutFeatures]
 
         x = torch.cat((x, metadata_emb), dim=-1)  # [B, N, emb_dim + nMetadataOutFeatures]
+
+        # prepend CLS token for classification prediction
+        tok = self.cls_token.expand(B, -1, -1)
+        # print("cls_tok expanded shape:", tok.shape)
+        x = torch.cat((tok, x), dim=1)      # [B, N + 1, emb_dim + nMetadataOutFeatures]
         x = x + self.pos_embed
 
         tf_skips: list[torch.Tensor] = []
@@ -229,13 +224,13 @@ class MyTransformer(nn.Module):
             # print("Layer input grad_fn:", x.grad_fn)
             x = layer(x)
 
-            y: torch.Tensor = self.fc_to_patches(x)
+            y: torch.Tensor = self.fc_to_patches(x)[:, 1:]
             y = y.permute(0, 2, 1)  # [B, emb_dim, N]
             y = y.reshape(B, E, p_split, p_split, p_split)
             tf_skips.append(y)
 
         x = self.fc_to_patches(x)  # [B, N, emb_dim]
-        tokens = x.clone()
+        tokens = x.clone()[:, 0]   # [B, 1, emb_dim]
 
         tf_skips = tf_skips[::-1]
         for i in range(len(tf_skips)):
@@ -255,7 +250,7 @@ class MyTransformer(nn.Module):
         # print("x shape before reshape:", x.shape)
 
         # reshape to match conv shape
-        x = x.reshape(B*N, X, Y, Z, E)
+        x = x[:, 1:].reshape(B*N, X, Y, Z, E)
         x = x.permute(0, 4, 1, 2, 3)
         x = unpatchTensor(x, nSubPatches)
         # print("Final x grad_fn:", x.grad_fn)

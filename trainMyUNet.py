@@ -115,7 +115,7 @@ def setupTrainer(plansJSONPath: str,
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device, tag)
     trainer.num_iterations_per_epoch = 200
     trainer.num_val_iterations_per_epoch = 50
-    trainer.num_epochs = 500
+    trainer.num_epochs = 1000
     trainer.initial_lr = 5e-7
     trainer.initialize()
 
@@ -128,16 +128,16 @@ def setupTrainer(plansJSONPath: str,
     ]
     # change optimizer and scheduler
     trainer.optimizer = torch.optim.AdamW([
-        {'params': non_transformer_params, 'lr': trainer.initial_lr * 20},
-        {'params': model.encoder.transformer.parameters(), 'lr': trainer.initial_lr},
-        {'params': model.decoder.parameters(), 'lr': trainer.initial_lr * 10},
-        {'params': model.classifier.parameters(), 'lr': trainer.initial_lr * 2e2},
-    ], weight_decay=1e-4)
+        {'params': non_transformer_params, 'lr': trainer.initial_lr * 20, 'weight_decay': 1e-4},
+        {'params': model.encoder.transformer.parameters(), 'lr': trainer.initial_lr, 'weight_decay': 1e-3},
+        {'params': model.decoder.parameters(), 'lr': trainer.initial_lr * 2e3,  'weight_decay': 1e-4},
+        {'params': model.classifier.parameters(), 'lr': trainer.initial_lr * 2e3, 'weight_decay': 1e-5},
+    ])
     trainer.aggregator = UPGrad()
 
     num_training_steps = trainer.num_epochs           # scheduler steps every epoch, not every batch
-    num_warmup_steps = round(0.1 * num_training_steps)  # 10% warmup
-    num_cycle_steps = round(0.45 * num_training_steps) + 1
+    num_warmup_steps = round(0.2 * num_training_steps)  # 10% warmup
+    num_cycle_steps = round(0.4 * num_training_steps) + 1
 
     trainer.lr_scheduler = WarmupCosineAnnealingWithRestarts(
         trainer.optimizer,
