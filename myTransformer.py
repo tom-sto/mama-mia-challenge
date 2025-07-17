@@ -106,25 +106,34 @@ class ClassifierHead(nn.Module):
 class MyTransformer(nn.Module):
     def __init__(
         self,
+        patch_size,
         channels,
         strides,
-        in_channels=2,
+        in_channels,
         transformer_depth=6,    # make this match num layers in decoder for skips: 6
         num_heads=10,
+        p_split=4
     ):
         super().__init__()
 
         self.channels = channels
         self.inChannels = in_channels
         self.emb_dim = channels[-1]
+        self.p_split = p_split
 
-        nMetadataInFeatures = 7             # 1 for age (linear), 2 for menopausal status (one-hot), 4 for breast density (one-hot)
-        nMetadataOutFeatures = num_heads    # needs to be divisible by num_heads
-        self.metadataEmbed = nn.Linear(nMetadataInFeatures, nMetadataOutFeatures)
+        nPatientDataInFeatures = 7             # 1 for age (linear), 2 for menopausal status (one-hot), 4 for breast density (one-hot)
+        nPatientDataOutFeatures = num_heads    # needs to be divisible by num_heads
+        self.patientDataEmbed = nn.Linear(nPatientDataInFeatures, nPatientDataOutFeatures)
+
+        expectedXYZ = patch_size
+        for _ in range(len(channels) + 1):
+            expectedXYZ = max(round(expectedXYZ / 2), 1)
 
         self.patch_embed = DeepPatchEmbed3D(channels, in_channels, strides)
-        self.cls_token = nn.Parameter(torch.randn((1, 1, self.emb_dim + nMetadataOutFeatures)))
-        self.pos_embed = nn.Parameter(torch.randn((self.emb_dim + nMetadataOutFeatures,)))  # learnable position embedding
+        self.cls_token = nn.Parameter(torch.randn((1, 1, self.emb_dim + nPatientDataOutFeatures)))
+        self.pos_embed = nn.Parameter(torch.randn((1, 
+                                                   round(p_split**3) * round(expectedXYZ**3) + 1, 
+                                                   self.emb_dim + nPatientDataOutFeatures,)))  # learnable position embedding
         self.skip_weights = nn.Parameter(torch.ones(len(self.patch_embed.decoder)) * 0.5)  # learnable skip connection weights
 
         ageMin = 21
@@ -141,14 +150,14 @@ class MyTransformer(nn.Module):
             else torch.tensor([0, 0, 0, 0])
 
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.emb_dim + nMetadataOutFeatures,
+            d_model=self.emb_dim + nPatientDataOutFeatures,
             nhead=num_heads,
-            dim_feedforward=(self.emb_dim + nMetadataOutFeatures) * 4,
+            dim_feedforward=(self.emb_dim + nPatientDataOutFeatures) * 4,
             batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_depth)
 
-        self.fc_to_patches = nn.Linear(self.emb_dim + nMetadataOutFeatures, self.emb_dim)
+        self.fc_to_patches = nn.Linear(self.emb_dim + nPatientDataOutFeatures, self.emb_dim)
 
         self._initialize_weights()
 
@@ -177,46 +186,40 @@ class MyTransformer(nn.Module):
 
         self.transformer.apply(init_weights_transformer)
 
-    def forward(self, x: torch.Tensor, metadata: list = None):
+    def forward(self, x: torch.Tensor, patientData: list = None):
         # print("X dist:", x.mean(), "+/-", x.std())
         P = x.shape[-1]
-        p_split = 4
         # Embed patches
-        subpatchSize = P // p_split       # split each patch into p_split**3 subpatches
+        subpatchSize = P // self.p_split       # split each patch into p_split**3 subpatches
         # print("Input x grad:", x.requires_grad)
         x, nSubPatches = subpatchTensor(x, subpatchSize)
         # print("Subpatched x grad:", x.grad_fn, " - nSubPatches:", nSubPatches)
         x, skips, (B, N, E, X, Y, Z) = self.patch_embed(x, nSubPatches)  # [B, N, emb_dim]
         # print(B, N, E, X, Y, Z)
-        # print("patch embedded x grad_fn:", x.grad_fn)
-        # for i, s in enumerate(skips):
-        #     print(f"Skip {i} grad_fn: {s.grad_fn}")
+        # X, Y, Z should be 1 if the dimensions align well and there are enough conv layers. 
+        # But they might not get down to 1, so we use them here to get the right size embedding
+        patientData_emb = torch.zeros(B, N*X*Y*Z, self.patientDataEmbed.out_features, device=x.device)  # [B, N, npatientDataOutFeatures]
 
-        # print("Embedded x shape:", x.shape)
+        if patientData is None:
+            patientData = [{'age': None, 'menopausal_status': None, 'breast_density': None} for _ in range(B)]
 
-        metadata_emb = torch.zeros(B, N, self.metadataEmbed.out_features, device=x.device)  # [B, N, nMetadataOutFeatures]
-
-        if metadata is None:
-            metadata = [{'age': None, 'menopausal_status': None, 'breast_density': None} for _ in range(B)]
-
-        # print(metadata)
-        for idx, md in enumerate(metadata):
+        # print(patientData)
+        for idx, md in enumerate(patientData):
             age = md['age']
             menopausal_status = md['menopausal_status']
             breast_density = md['breast_density']
             age_emb = self.ageEncode(age).to(x.device)
             meno_emb = self.menoEncode(menopausal_status).to(x.device)
             density_emb = self.densityEncode(breast_density).to(x.device)
-            concat = torch.cat((age_emb, meno_emb, density_emb), dim=0).unsqueeze(0)  # [1, nMetadataInFeatures]
-            concat: torch.Tensor = self.metadataEmbed(concat)  # [1, nMetadataOutFeatures]
-            metadata_emb[idx] += concat.repeat(N, 1)  # [B, N, nMetadataOutFeatures]
+            concat = torch.cat((age_emb, meno_emb, density_emb), dim=0).unsqueeze(0)  # [1, npatientDataInFeatures]
+            concat: torch.Tensor = self.patientDataEmbed(concat)  # [1, npatientDataOutFeatures]
+            patientData_emb[idx] += concat.repeat(N*X*Y*Z, 1)  # [B, N*X*Y*Z, npatientDataOutFeatures]
 
-        x = torch.cat((x, metadata_emb), dim=-1)  # [B, N, emb_dim + nMetadataOutFeatures]
+        x = torch.cat((x, patientData_emb), dim=-1)  # [B, N*X*Y*Z, emb_dim + npatientDataOutFeatures]
 
         # prepend CLS token for classification prediction
         tok = self.cls_token.expand(B, -1, -1)
-        # print("cls_tok expanded shape:", tok.shape)
-        x = torch.cat((tok, x), dim=1)      # [B, N + 1, emb_dim + nMetadataOutFeatures]
+        x = torch.cat((tok, x), dim=1)      # [B, N*X*Y*Z + 1, emb_dim + npatientDataOutFeatures]
         x = x + self.pos_embed
 
         tf_skips: list[torch.Tensor] = []
@@ -224,12 +227,12 @@ class MyTransformer(nn.Module):
             # print("Layer input grad_fn:", x.grad_fn)
             x = layer(x)
 
-            y: torch.Tensor = self.fc_to_patches(x)[:, 1:]
-            y = y.permute(0, 2, 1)  # [B, emb_dim, N]
-            y = y.reshape(B, E, p_split, p_split, p_split)
+            y: torch.Tensor = self.fc_to_patches(x)[:, 1:]  # [B, N*X*Y*Z, emb_dim]
+            y = y.permute(0, 2, 1)  # [B, emb_dim, N*X*Y*Z]
+            y = y.reshape(B, E, self.p_split*X, self.p_split*Y, self.p_split*Z)       # [B, emb_dim, p_split, p_split, p_split]
             tf_skips.append(y)
 
-        x = self.fc_to_patches(x)  # [B, N, emb_dim]
+        x = self.fc_to_patches(x)  # [B, N*X*Y*Z + 1, emb_dim]
         tokens = x.clone()[:, 0]   # [B, 1, emb_dim]
 
         tf_skips = tf_skips[::-1]

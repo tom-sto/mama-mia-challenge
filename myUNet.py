@@ -6,9 +6,12 @@ class myUNet(torch.nn.Module):
     def __init__(self, 
                  pretrainedModelArch: PlainConvUNet,
                  inChannels: int,
+                 expectedPatchSize: int,
                  expectedChannels: list[int], 
                  expectedStride: list[int],
                  pretrainedModelPath: str = None,
+                 p_split: int = 4,
+                 n_heads: int = 8
                  ):
         super().__init__()
 
@@ -21,16 +24,14 @@ class myUNet(torch.nn.Module):
             decoderStateDict = {k.replace("decoder.", ""): v for k, v in stateDict.items() if "decoder" in k}
             pretrainedModelArch.decoder.load_state_dict(decoderStateDict, strict=False)
 
-        self.encoder = MyTransformer(expectedChannels, expectedStride, inChannels, num_heads=8)
+        self.encoder = MyTransformer(expectedPatchSize, expectedChannels, expectedStride, inChannels, num_heads=n_heads, p_split=p_split)
         self.decoder = pretrainedModelArch.decoder
         self.classifier = ClassifierHead(dim=expectedChannels[-1])
 
         self.ret = "all"
 
-    def forward(self, x: torch.Tensor, metadata: list = None):
-        B = x.shape[0]
-        imgShape = x.shape[2:]
-        features, skips, transformer_tokens = self.encoder(x, metadata)
+    def forward(self, x: torch.Tensor, patientData: list = None):
+        features, skips, transformer_tokens = self.encoder(x, patientData)
         skips[-1] = features
         segOut = self.decoder(skips)
 
@@ -41,19 +42,8 @@ class myUNet(torch.nn.Module):
 
         if self.ret == "all":
             return features, segOut, clsOut
-        elif self.ret == "cls":
-            clsOut = torch.sigmoid(clsOut)     # activate before sending to "segmentation"
-            filled = []
-            # print("x shape:", x.shape)
-            # print("cls_out shape:", cls_out.shape)
-            # this is some fuckery. it might work tho...
-            for b in range(B):
-                fg = torch.fill(torch.empty(imgShape), clsOut[b].item()).to(x.device)
-                bg = -fg + 1
-                filled.append(torch.stack([bg, fg], dim=0))  # [2, H, W, D]
-            filled = torch.stack(filled, dim=0)     # [B, 2, H, W, D]
-            # print("cls_out:", clsOut)
-            return filled
+        elif self.ret == "probability":
+            return torch.sigmoid(clsOut)
         return
     
 if __name__ == "__main__":

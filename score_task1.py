@@ -84,11 +84,13 @@ def evaluateAcrossDatasets(inpDir: str):
     # Filter and calculate average DSC for each group
     groups = ["DUKE", "ISPY1", "ISPY2", "NACT"]
     average_dsc = {}
+    average_hd = {}
 
     for group in groups:
         # Filter rows where patient_id contains the group and ignore NaN values in DSC
         group_df = df[df['patient_id'].str.contains(group, na=False)]
         average_dsc[group] = group_df['DSC'].mean()
+        average_hd[group] = group_df['NormHD'].mean()
 
     # Print the results
     for group, avg in average_dsc.items():
@@ -96,13 +98,53 @@ def evaluateAcrossDatasets(inpDir: str):
 
     print("Overall Average DSC:", df['DSC'].dropna().mean())
 
+    for group, avg in average_hd.items():
+        print(f"Average HD for {group}: {avg}")
+
+    print("Overall Average HD:", df['NormHD'].dropna().mean())
+
+    performance_score = 0.5 * (df['DSC'].dropna().mean() + (1 - df['NormHD'].dropna().mean()))
+    print(f'Performance score: {performance_score:.4f}')
+
+    # Compute fairness score across selected variables
+    selected_fairness_variables = ['age', 'menopause', 'breast_density']
+    fairness_score_dict = {}
+    for variable in selected_fairness_variables:
+        # Split the fairness_varibles_df into groups based on the values of the column 'variable'
+        groups = df.groupby(variable)
+        # Initialize lists to store group-level metrics
+        dice_scores_groups = []
+        norm_hd_scores_groups = []
+        # Compute group-level averages for Dice and Hausdorff Distance
+        for group in groups:
+            group_name = group[0]
+            avg_dice = group[1]['DSC'].mean()
+            avg_norm_hd = group[1]['NormHD'].mean()
+            dice_scores_groups.append(avg_dice)
+            norm_hd_scores_groups.append(avg_norm_hd)
+        # Compute disparities: max - min across groups
+        dice_disparity = max(dice_scores_groups) - min(dice_scores_groups)
+        normalized_hd_disparity = max(norm_hd_scores_groups) - min(norm_hd_scores_groups)
+        fairness_score = 1 - 0.5 * (dice_disparity + normalized_hd_disparity)
+        # Append fairness variable and disparity to the dictionary
+        fairness_score_dict[variable] = fairness_score
+    
+    avg_fairness_score = sum([fairness_score_dict[variable] for variable in selected_fairness_variables])
+    avg_fairness_score = avg_fairness_score/len(selected_fairness_variables)
+    print(f'Average fairness score: {avg_fairness_score:.4f}')
+    alpha = 0.5
+    # Final ranking score: combination of performance and fairness
+    ranking_score = (1 - alpha)*performance_score + alpha*avg_fairness_score
+    print(f'Ranking score: {ranking_score:.4f}')
+
 def doScoring(inpDir: str, corrupted: bool = False):
     doUncropping(inpDir)
     generate_scores(data_dir, inpDir, forCorrupted=corrupted)
     evaluateAcrossDatasets(inpDir)
 
 if __name__ == "__main__":
-    inpDir = "./nnUNet_results/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_4_transformer_joint_pos_weight_and_more_augmentations/outputs"
+    inpDir = r"nnUNet_results\Dataset104_cropped_3ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4"
     # doUncropping(inpDir)
-    generate_scores(data_dir, inpDir)
+    # generate_scores(data_dir, inpDir)
     evaluateAcrossDatasets(inpDir)
+

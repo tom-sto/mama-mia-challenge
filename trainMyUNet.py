@@ -104,6 +104,7 @@ def setupTrainer(plansJSONPath: str,
     with open(plansJSONPath, 'r', encoding="utf-8") as fp:
         plans = json.load(fp)
         # plans = resolve_modules_in_dict(plans)
+        expectedPatchSize = plans["configurations"][config]["patch_size"][0]
         kwargs = plans["configurations"][config]["architecture"]["arch_kwargs"]
         expectedChannels = kwargs["features_per_stage"]
         expectedStride = [x[0] for x in kwargs["strides"]]      # these are saved per-channel, but I'm putting all channels through at once
@@ -113,13 +114,21 @@ def setupTrainer(plansJSONPath: str,
         nInChannels = len(datasetInfo["channel_names"])
 
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device, tag)
+    # trainer.grad_scaler = None
     trainer.num_iterations_per_epoch = 200
     trainer.num_val_iterations_per_epoch = 50
     trainer.num_epochs = 1000
-    trainer.initial_lr = 5e-7
+    trainer.initial_lr = 1e-5
     trainer.initialize()
 
-    model = myUNet(trainer.network, nInChannels, expectedChannels, expectedStride, pretrainedModelPath).to(device)
+    p_split = 4
+    model = myUNet(trainer.network, 
+                   nInChannels, 
+                   expectedPatchSize, 
+                   expectedChannels, 
+                   expectedStride, 
+                   pretrainedModelPath, 
+                   p_split=p_split).to(device)
     trainer.network = model
 
     non_transformer_params = [
@@ -130,8 +139,8 @@ def setupTrainer(plansJSONPath: str,
     trainer.optimizer = torch.optim.AdamW([
         {'params': non_transformer_params, 'lr': trainer.initial_lr * 20, 'weight_decay': 1e-4},
         {'params': model.encoder.transformer.parameters(), 'lr': trainer.initial_lr, 'weight_decay': 1e-3},
-        {'params': model.decoder.parameters(), 'lr': trainer.initial_lr * 2e3,  'weight_decay': 1e-4},
-        {'params': model.classifier.parameters(), 'lr': trainer.initial_lr * 2e3, 'weight_decay': 1e-5},
+        {'params': model.decoder.parameters(), 'lr': trainer.initial_lr,  'weight_decay': 1e-4},
+        {'params': model.classifier.parameters(), 'lr': trainer.initial_lr * 10, 'weight_decay': 1e-5},
     ])
     trainer.aggregator = UPGrad()
 
@@ -278,25 +287,48 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
 
     from score_task1 import doScoring
     doScoring(os.path.dirname(outputPath))
-    import pdb
+    import pdb, pandas as pd, SimpleITK as sitk
     pdb.set_trace()
 
     # do pCR inference
-    trainer.network.ret = "cls"
-    predictor = nnUNetPredictor(tile_step_size=1, use_gaussian=False, use_mirroring=False,
-                                perform_everything_on_device=True, device=trainer.device, verbose=False,
-                                verbose_preprocessing=False, allow_tqdm=False)
-    predictor.manual_initialization(trainer.network, trainer.plans_manager, trainer.configuration_manager,
-                                    [state_dict], trainer.dataset_json, trainer.__class__.__name__,
-                                    trainer.inference_allowed_mirroring_axes)
-    os.makedirs(outputPathPCR, exist_ok=True)
-    ret = predictor.predict_from_files(
-        inputFolder,
-        outputPathPCR
-    )
+    trainer.network.ret = "probability"
+    out_df = pd.DataFrame(columns=['patient_id', 'pcr_prob'])
+    patientIDS_seen = []
+    for imgName in os.listdir(inputFolder):
+        patientID = imgName.split('.')[0][:-5]
+        if patientID in patientIDS_seen:
+            continue
+        patientIDS_seen.append(patientID)
+        print(f"Predicting for patient {patientID}")
+        
+        arrs = []
+        for i in range(4):
+            imgPath = os.path.join(inputFolder, f"{patientID}_000{i}.nii.gz")
+
+            arr = sitk.GetArrayFromImage(sitk.ReadImage(imgPath))
+            arr = torch.from_numpy(arr).unsqueeze(0)
+            arrs.append(arr)
+
+        with torch.autocast(trainer.device.type):
+            arr = torch.cat(arrs)
+            assert len(arr.shape) == 4, f'Expected shape (C, X, Y, Z), got shape {arr.shape}'
+            arr = arr.unsqueeze(0).to(trainer.device).float()
+            p: torch.Tensor = trainer.network(arr)
+
+        data = pd.DataFrame({
+            'patient_id': [patientID.upper()],
+            'pcr_prob': [p.item()],
+        })
+        out_df = pd.concat([out_df, data], ignore_index=True)
+
+    pred_path = os.path.join(os.path.dirname(outputPathPCR), 'pcr_predictions.csv')
+    print(f"Saving to {pred_path}")
+    out_df.to_csv(pred_path, index=False)
 
     from predictPCR import scorePCR
-    scorePCR(outputPathPCR)
+    scorePCR(pred_path)
+    from MAMAMIA.src.challenge.scoring_task2 import doScoring
+    doScoring(os.path.dirname(pred_path))
     
 
 if __name__ == "__main__":
@@ -310,7 +342,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_joint_JD_last_try"
+    tag = "_transformer_joint_JD_fixed_pos_embed"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
@@ -320,7 +352,7 @@ if __name__ == "__main__":
                            tag=tag)
     
     output_folder = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}"
-    state_dict_path = rf"{output_folder}/checkpoint_best_myUNet.pth"
+    state_dict_path = rf"{output_folder}/checkpoint_best_joint.pth"
     
     # lr = []
     # for epoch in range(trainer.num_epochs):
