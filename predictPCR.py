@@ -110,5 +110,7 @@ def scorePCR(predictionsDF: str,
     plt.savefig(os.path.join(os.path.dirname(predictionsDF), 'ROC.png'))
 
 if __name__ == "__main__":
-    predDFpath = r"nnUNet_results\Dataset200_global_local_4ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4_pcr_transformer_more_reg_less_transformer\outputs\pcr_predictions.csv" 
-    scorePCR(predDFpath)
+    predDFpath = r"nnUNet_results\Dataset200_global_local_4ch_breast\nnUNetTrainer__nnUNetPlans__3d_fullres\fold_4_pcr_transformer_more_classifier\outputs\pcr_predictions.csv" 
+    scorePCR(predDFpath, threshold=0.4444444)
+    from MAMAMIA.src.challenge.scoring_task2 import doScoring
+    doScoring(os.path.dirname(predDFpath))
