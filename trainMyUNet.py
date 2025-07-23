@@ -30,11 +30,13 @@ class PCRLoss(torch.nn.Module):
         """
         # Convert list to tensor if needed
         if isinstance(targets, list):
-            targets = torch.tensor(targets, dtype=torch.float32, device=logits.device)
+            targets = torch.tensor(targets, device=logits.device)
+
+        targets = targets.float()
 
         # Ensure logits and targets match in shape
         if logits.ndim == 2 and logits.shape[1] == 1:
-            logits = logits.squeeze(1)  # shape (B,)
+            logits = logits.squeeze(1).float()  # shape (B,)
 
         loss = self.bce(logits, targets).float()
 
@@ -114,7 +116,7 @@ def setupTrainer(plansJSONPath: str,
         nInChannels = len(datasetInfo["channel_names"])
 
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device, tag)
-    # trainer.grad_scaler = None
+    # trainer.pretrainSegmentation = 0
     trainer.num_iterations_per_epoch = 200
     trainer.num_val_iterations_per_epoch = 50
     trainer.num_epochs = 1000
@@ -166,7 +168,7 @@ def setupTrainer(plansJSONPath: str,
 
 def train(trainer: nnUNetTrainer, continue_training: bool = False):
     if continue_training:
-        trainer.load_checkpoint(os.path.join(trainer.output_folder, 'checkpoint_latest.pth'))
+        trainer.load_checkpoint(os.path.join(trainer.output_folder, 'checkpoint_latest_myUNet.pth'))
         print(f"Continuing training from epoch {trainer.current_epoch}")
     else:
         trainer.current_epoch = 0
@@ -342,7 +344,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_joint_JD_fixed_pos_embed"
+    tag = "_transformer_joint_JD_July21"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
@@ -364,7 +366,7 @@ if __name__ == "__main__":
     # plt.xlabel("Epoch")
     # plt.ylabel("Learning Rate")
     # plt.savefig("lr_schedule.png")
-    train(trainer)
+    train(trainer, continue_training=True)
     inference(trainer, 
               state_dict_path, 
               outputPath=rf"{output_folder}/outputs/pred_segmentations_cropped",

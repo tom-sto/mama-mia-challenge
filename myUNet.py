@@ -31,14 +31,15 @@ class myUNet(torch.nn.Module):
         self.ret = "all"
 
     def forward(self, x: torch.Tensor, patientData: list = None):
-        features, skips, transformer_tokens = self.encoder(x, patientData)
-        skips[-1] = features
+        features, skips, cls_token = self.encoder(x, patientData)
         segOut = self.decoder(skips)
 
+        # print("Features:", features.shape)
+        # print("cls token:", cls_token.shape)
         if self.ret == "seg":
             return segOut
 
-        clsOut = self.classifier(transformer_tokens)
+        clsOut = self.classifier(cls_token)
 
         if self.ret == "all":
             return features, segOut, clsOut

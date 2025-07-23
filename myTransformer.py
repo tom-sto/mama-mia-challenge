@@ -58,6 +58,7 @@ class DeepPatchEmbed3D(nn.Module):
 
         # Create decoder blocks (mirrored but reinitialized)
         for i in reversed(range(len(channels) - 1)):
+            if i == 0: continue
             block = nn.Sequential(
                 nn.BatchNorm3d(channels[i + 1]),
                 nn.Conv3d(channels[i + 1], channels[i], kernel_size=3, padding=1),
@@ -133,8 +134,8 @@ class MyTransformer(nn.Module):
         self.cls_token = nn.Parameter(torch.randn((1, 1, self.emb_dim + nPatientDataOutFeatures)))
         self.pos_embed = nn.Parameter(torch.randn((1, 
                                                    round(p_split**3) * round(expectedXYZ**3) + 1, 
-                                                   self.emb_dim + nPatientDataOutFeatures,)))  # learnable position embedding
-        self.skip_weights = nn.Parameter(torch.ones(len(self.patch_embed.decoder)) * 0.5)  # learnable skip connection weights
+                                                   self.emb_dim + nPatientDataOutFeatures)))  # learnable position embedding
+        self.skip_weights = nn.Parameter(torch.randn((len(self.channels) - 2,)))  # learnable skip connection weights
 
         ageMin = 21
         ageMax = 77
@@ -222,40 +223,38 @@ class MyTransformer(nn.Module):
         x = torch.cat((tok, x), dim=1)      # [B, N*X*Y*Z + 1, emb_dim + npatientDataOutFeatures]
         x = x + self.pos_embed
 
-        tf_skips: list[torch.Tensor] = []
-        for layer in self.transformer.layers:
-            # print("Layer input grad_fn:", x.grad_fn)
-            x = layer(x)
-
-            y: torch.Tensor = self.fc_to_patches(x)[:, 1:]  # [B, N*X*Y*Z, emb_dim]
-            y = y.permute(0, 2, 1)  # [B, emb_dim, N*X*Y*Z]
-            y = y.reshape(B, E, self.p_split*X, self.p_split*Y, self.p_split*Z)       # [B, emb_dim, p_split, p_split, p_split]
-            tf_skips.append(y)
+        x = self.transformer(x)
 
         x = self.fc_to_patches(x)  # [B, N*X*Y*Z + 1, emb_dim]
-        tokens = x.clone()[:, 0]   # [B, 1, emb_dim]
 
-        tf_skips = tf_skips[::-1]
-        for i in range(len(tf_skips)):
-            expected_shape = skips[-(i+1)].shape
-            if i == 0:
-                assert tf_skips[i].shape == expected_shape, f"Skip {i} shape {tf_skips[i].shape} does not match expected shape {expected_shape}"
-                continue
-            for j in range(i):
-                tf_skips[i] = self.patch_embed.decoder[j](tf_skips[i])
-            assert tf_skips[i].shape == expected_shape, f"Skip {i} shape {tf_skips[i].shape} does not match expected shape {expected_shape}"
-
-        tf_skips = tf_skips[::-1]
-
-        for i in range(len(skips)):
-            skips[i] = (1 - self.skip_weights[i]) * skips[i] + self.skip_weights[i] * tf_skips[i]
-
-        # print("x shape before reshape:", x.shape)
+        cls_token = x[:, 0]   # [B, 1, emb_dim].
+        
+        tf_skip: torch.Tensor = x[:, 1:]  # [B, N*X*Y*Z, emb_dim]
+        tf_skip = tf_skip.permute(0, 2, 1)  # [B, emb_dim, N*X*Y*Z]
+        tf_skip = tf_skip.reshape(B, E, self.p_split*X, self.p_split*Y, self.p_split*Z)       # [B, emb_dim, p_split, p_split, p_split]
+        # print("tf_skip size", tf_skip.shape)
 
         # reshape to match conv shape
         x = x[:, 1:].reshape(B*N, X, Y, Z, E)
         x = x.permute(0, 4, 1, 2, 3)
-        x = unpatchTensor(x, nSubPatches)
+        features = unpatchTensor(x, nSubPatches)
+
+        tf_skips = [features]       # Last input here is the "bottleneck" features for the decoder
+        for j in range(len(self.patch_embed.decoder) - 1):
+            tf_skip = self.patch_embed.decoder[j](tf_skip)
+            expected_shape = skips[-(j+2)].shape
+            assert tf_skip.shape == expected_shape, f"TF Skip shape {tf_skip.shape} does not match expected shape {expected_shape}"
+            tf_skips.insert(0, tf_skip)     # put in reverse order to match skips
+        
+        # print("tf_skips:", [x.shape for x in tf_skips])
+        # print("skips:", [x.shape for x in skips])
+        
+        sigWeights = torch.sigmoid(self.skip_weights)
+        for i in range(len(skips)):
+            if i == 0: continue     # leave skip connection from last encoder block alone
+            skips[i] = sigWeights[i-1] * tf_skips[i-1] + (-sigWeights[i-1] + 1) * skips[i]
+
+        # print("x shape before reshape:", x.shape)
         # print("Final x grad_fn:", x.grad_fn)
 
         # print("Final x shape:", x.shape)
@@ -263,7 +262,7 @@ class MyTransformer(nn.Module):
         # print("Final tokens shape:", tokens.shape)
         # print("x == last layer?", torch.all(x == tf_skips[-1]))
 
-        return x, skips, tokens
+        return features, skips, cls_token
 
 if __name__ == "__main__":
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
