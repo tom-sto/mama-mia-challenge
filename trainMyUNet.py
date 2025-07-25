@@ -116,10 +116,10 @@ def setupTrainer(plansJSONPath: str,
         nInChannels = len(datasetInfo["channel_names"])
 
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device, tag)
-    # trainer.pretrainSegmentation = 0
     trainer.num_iterations_per_epoch = 200
     trainer.num_val_iterations_per_epoch = 50
     trainer.num_epochs = 1000
+    trainer.pretrainSegmentation = trainer.num_epochs // 3
     trainer.initial_lr = 1e-5
     trainer.initialize()
 
@@ -289,48 +289,48 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
 
     from score_task1 import doScoring
     doScoring(os.path.dirname(outputPath))
-    import pdb, pandas as pd, SimpleITK as sitk
-    pdb.set_trace()
+    # import pdb, pandas as pd, SimpleITK as sitk
+    # pdb.set_trace()
 
-    # do pCR inference
-    trainer.network.ret = "probability"
-    out_df = pd.DataFrame(columns=['patient_id', 'pcr_prob'])
-    patientIDS_seen = []
-    for imgName in os.listdir(inputFolder):
-        patientID = imgName.split('.')[0][:-5]
-        if patientID in patientIDS_seen:
-            continue
-        patientIDS_seen.append(patientID)
-        print(f"Predicting for patient {patientID}")
+    # # do pCR inference
+    # trainer.network.ret = "probability"
+    # out_df = pd.DataFrame(columns=['patient_id', 'pcr_prob'])
+    # patientIDS_seen = []
+    # for imgName in os.listdir(inputFolder):
+    #     patientID = imgName.split('.')[0][:-5]
+    #     if patientID in patientIDS_seen:
+    #         continue
+    #     patientIDS_seen.append(patientID)
+    #     print(f"Predicting for patient {patientID}")
         
-        arrs = []
-        for i in range(4):
-            imgPath = os.path.join(inputFolder, f"{patientID}_000{i}.nii.gz")
+    #     arrs = []
+    #     for i in range(3):
+    #         imgPath = os.path.join(inputFolder, f"{patientID}_000{i}.nii.gz")
 
-            arr = sitk.GetArrayFromImage(sitk.ReadImage(imgPath))
-            arr = torch.from_numpy(arr).unsqueeze(0)
-            arrs.append(arr)
+    #         arr = sitk.GetArrayFromImage(sitk.ReadImage(imgPath))
+    #         arr = torch.from_numpy(arr).unsqueeze(0)
+    #         arrs.append(arr)
 
-        with torch.autocast(trainer.device.type):
-            arr = torch.cat(arrs)
-            assert len(arr.shape) == 4, f'Expected shape (C, X, Y, Z), got shape {arr.shape}'
-            arr = arr.unsqueeze(0).to(trainer.device).float()
-            p: torch.Tensor = trainer.network(arr)
+    #     with torch.autocast(trainer.device.type):
+    #         arr = torch.cat(arrs)
+    #         assert len(arr.shape) == 4, f'Expected shape (C, X, Y, Z), got shape {arr.shape}'
+    #         arr = arr.unsqueeze(0).to(trainer.device).float()
+    #         p: torch.Tensor = trainer.network(arr)
 
-        data = pd.DataFrame({
-            'patient_id': [patientID.upper()],
-            'pcr_prob': [p.item()],
-        })
-        out_df = pd.concat([out_df, data], ignore_index=True)
+    #     data = pd.DataFrame({
+    #         'patient_id': [patientID.upper()],
+    #         'pcr_prob': [p.item()],
+    #     })
+    #     out_df = pd.concat([out_df, data], ignore_index=True)
 
-    pred_path = os.path.join(os.path.dirname(outputPathPCR), 'pcr_predictions.csv')
-    print(f"Saving to {pred_path}")
-    out_df.to_csv(pred_path, index=False)
+    # pred_path = os.path.join(os.path.dirname(outputPathPCR), 'pcr_predictions.csv')
+    # print(f"Saving to {pred_path}")
+    # out_df.to_csv(pred_path, index=False)
 
-    from predictPCR import scorePCR
-    scorePCR(pred_path)
-    from MAMAMIA.src.challenge.scoring_task2 import doScoring
-    doScoring(os.path.dirname(pred_path))
+    # from predictPCR import scorePCR
+    # scorePCR(pred_path)
+    # from MAMAMIA.src.challenge.scoring_task2 import doScoring
+    # doScoring(os.path.dirname(pred_path))
     
 
 if __name__ == "__main__":
@@ -354,7 +354,7 @@ if __name__ == "__main__":
                            tag=tag)
     
     output_folder = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}"
-    state_dict_path = rf"{output_folder}/checkpoint_best_joint.pth"
+    state_dict_path = rf"{output_folder}/checkpoint_best_for_seg.pth"
     
     # lr = []
     # for epoch in range(trainer.num_epochs):
@@ -366,7 +366,7 @@ if __name__ == "__main__":
     # plt.xlabel("Epoch")
     # plt.ylabel("Learning Rate")
     # plt.savefig("lr_schedule.png")
-    train(trainer, continue_training=True)
+    # train(trainer, continue_training=True)
     inference(trainer, 
               state_dict_path, 
               outputPath=rf"{output_folder}/outputs/pred_segmentations_cropped",
