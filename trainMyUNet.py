@@ -14,15 +14,15 @@ from myUNet import myUNet
 writer = None
 
 class PCRLoss(torch.nn.Module):
-    def __init__(self):
+    def __init__(trainer):
         """
         alpha and beta are weighting terms in case you want to combine BCE with another loss
         for example: total_loss = alpha * BCE + beta * focal or another auxiliary term.
         """
-        super(PCRLoss, self).__init__()
-        self.bce = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor(2.4))  # this data set sees 70% negative, 30% positive
+        super(PCRLoss, trainer).__init__()
+        trainer.bce = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor(2.4))  # this data set sees 70% negative, 30% positive
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor):
+    def forward(trainer, logits: torch.Tensor, targets: torch.Tensor):
         """
         Args:
             logits: (B,) or (B, 1) raw model outputs (before sigmoid)
@@ -38,7 +38,7 @@ class PCRLoss(torch.nn.Module):
         if logits.ndim == 2 and logits.shape[1] == 1:
             logits = logits.squeeze(1).float()  # shape (B,)
 
-        loss = self.bce(logits, targets).float()
+        loss = trainer.bce(logits, targets).float()
 
         return loss
 
@@ -119,7 +119,7 @@ def setupTrainer(plansJSONPath: str,
     trainer.num_iterations_per_epoch = 200
     trainer.num_val_iterations_per_epoch = 50
     trainer.num_epochs = 1000
-    trainer.pretrainSegmentation = trainer.num_epochs // 3
+    trainer.pretrainSegmentation = trainer.num_epochs
     trainer.initial_lr = 1e-5
     trainer.initialize()
 
@@ -141,8 +141,7 @@ def setupTrainer(plansJSONPath: str,
     trainer.optimizer = torch.optim.AdamW([
         {'params': non_transformer_params, 'lr': trainer.initial_lr * 20, 'weight_decay': 1e-4},
         {'params': model.encoder.transformer.parameters(), 'lr': trainer.initial_lr, 'weight_decay': 1e-3},
-        {'params': model.decoder.parameters(), 'lr': trainer.initial_lr,  'weight_decay': 1e-4},
-        {'params': model.classifier.parameters(), 'lr': trainer.initial_lr * 10, 'weight_decay': 1e-5},
+        {'params': model.decoder.parameters(), 'lr': trainer.initial_lr,  'weight_decay': 1e-4}
     ])
     trainer.aggregator = UPGrad()
 
@@ -344,7 +343,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_joint_JD_July21"
+    tag = "_transformer_st"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
@@ -366,7 +365,7 @@ if __name__ == "__main__":
     # plt.xlabel("Epoch")
     # plt.ylabel("Learning Rate")
     # plt.savefig("lr_schedule.png")
-    # train(trainer, continue_training=True)
+    train(trainer)
     inference(trainer, 
               state_dict_path, 
               outputPath=rf"{output_folder}/outputs/pred_segmentations_cropped",
