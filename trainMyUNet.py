@@ -281,55 +281,85 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
     inputFolder = os.path.join(os.environ["nnUNet_raw"], datasetName, "imagesTs")       # THESE IMAGES ARE CROPPED
 
     os.makedirs(outputPath, exist_ok=True)
-    ret = predictor.predict_from_files(
-        inputFolder,
-        outputPath
-    )
+    # ret = predictor.predict_from_files(
+    #     inputFolder,
+    #     outputPath
+    # )
 
-    from score_task1 import doScoring
-    doScoring(os.path.dirname(outputPath))
-    # import pdb, pandas as pd, SimpleITK as sitk
+    # from score_task1 import doScoring
+    # doScoring(os.path.dirname(outputPath))
+    import pdb, pandas as pd, SimpleITK as sitk
     # pdb.set_trace()
 
-    # # do pCR inference
-    # trainer.network.ret = "probability"
-    # out_df = pd.DataFrame(columns=['patient_id', 'pcr_prob'])
-    # patientIDS_seen = []
-    # for imgName in os.listdir(inputFolder):
-    #     patientID = imgName.split('.')[0][:-5]
-    #     if patientID in patientIDS_seen:
-    #         continue
-    #     patientIDS_seen.append(patientID)
-    #     print(f"Predicting for patient {patientID}")
+    def pad_to_patch_compatible_size(arr: torch.Tensor, patch_size: int) -> torch.Tensor:
+        """
+        Pads the spatial dimensions of the input tensor evenly with zeros to make them divisible by the patch size.
+
+        Args:
+            arr (torch.Tensor): Input tensor of shape (C, X, Y, Z).
+            patch_size (int): The patch size to make the spatial dimensions divisible by.
+
+        Returns:
+            torch.Tensor: Padded tensor with spatial dimensions divisible by the patch size.
+        """
+        _, x, y, z = arr.shape
+        pad_x = (patch_size - x % patch_size) % patch_size
+        pad_y = (patch_size - y % patch_size) % patch_size
+        pad_z = (patch_size - z % patch_size) % patch_size
+
+        # Calculate padding for each dimension (even padding on both sides)
+        padding = (
+            pad_z // 2, pad_z - pad_z // 2,  # Z dimension
+            pad_y // 2, pad_y - pad_y // 2,  # Y dimension
+            pad_x // 2, pad_x - pad_x // 2   # X dimension
+        )
+
+        # Apply padding
+        padded_arr = torch.nn.functional.pad(arr, padding, mode='constant', value=0)
+        return padded_arr
+
+    # do pCR inference
+    trainer.network.ret = "probability"
+    out_df = pd.DataFrame(columns=['patient_id', 'pcr_prob'])
+    patientIDS_seen = []
+    for imgName in os.listdir(inputFolder):
+        patientID = imgName.split('.')[0][:-5]
+        if patientID in patientIDS_seen:
+            continue
+        patientIDS_seen.append(patientID)
+        print(f"Predicting for patient {patientID}")
         
-    #     arrs = []
-    #     for i in range(3):
-    #         imgPath = os.path.join(inputFolder, f"{patientID}_000{i}.nii.gz")
+        arrs = []
+        for i in range(3):
+            imgPath = os.path.join(inputFolder, f"{patientID}_000{i}.nii.gz")
 
-    #         arr = sitk.GetArrayFromImage(sitk.ReadImage(imgPath))
-    #         arr = torch.from_numpy(arr).unsqueeze(0)
-    #         arrs.append(arr)
+            arr = sitk.GetArrayFromImage(sitk.ReadImage(imgPath))
+            arr = torch.from_numpy(arr).unsqueeze(0)
+            arrs.append(arr)
 
-    #     with torch.autocast(trainer.device.type):
-    #         arr = torch.cat(arrs)
-    #         assert len(arr.shape) == 4, f'Expected shape (C, X, Y, Z), got shape {arr.shape}'
-    #         arr = arr.unsqueeze(0).to(trainer.device).float()
-    #         p: torch.Tensor = trainer.network(arr)
+        with torch.autocast(trainer.device.type):
+            arr = torch.cat(arrs)
+            print(f"Arr.shape = {arr.shape}")
+            assert len(arr.shape) == 4, f'Expected shape (C, X, Y, Z), got shape {arr.shape}'
+            arr = pad_to_patch_compatible_size(arr, 32)
+            print(f"arr shape after padding: {arr.shape}")
+            arr = arr.unsqueeze(0).to(trainer.device).float()
+            p: torch.Tensor = trainer.network(arr)
 
-    #     data = pd.DataFrame({
-    #         'patient_id': [patientID.upper()],
-    #         'pcr_prob': [p.item()],
-    #     })
-    #     out_df = pd.concat([out_df, data], ignore_index=True)
+        data = pd.DataFrame({
+            'patient_id': [patientID.upper()],
+            'pcr_prob': [p.item()],
+        })
+        out_df = pd.concat([out_df, data], ignore_index=True)
 
-    # pred_path = os.path.join(os.path.dirname(outputPathPCR), 'pcr_predictions.csv')
-    # print(f"Saving to {pred_path}")
-    # out_df.to_csv(pred_path, index=False)
+    pred_path = os.path.join(os.path.dirname(outputPathPCR), 'pcr_predictions.csv')
+    print(f"Saving to {pred_path}")
+    out_df.to_csv(pred_path, index=False)
 
-    # from predictPCR import scorePCR
-    # scorePCR(pred_path)
-    # from MAMAMIA.src.challenge.scoring_task2 import doScoring
-    # doScoring(os.path.dirname(pred_path))
+    from predictPCR import scorePCR
+    scorePCR(pred_path)
+    from MAMAMIA.src.challenge.scoring_task2 import doScoring
+    doScoring(os.path.dirname(pred_path))
     
 
 if __name__ == "__main__":
@@ -343,7 +373,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_st"
+    tag = "_transformer_joint_JD_July21"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
@@ -353,7 +383,7 @@ if __name__ == "__main__":
                            tag=tag)
     
     output_folder = rf"{os.environ["nnUNet_results"]}/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_{fold}{tag}"
-    state_dict_path = rf"{output_folder}/checkpoint_best_for_seg.pth"
+    state_dict_path = rf"{output_folder}/checkpoint_best_for_PCR.pth"
     
     # lr = []
     # for epoch in range(trainer.num_epochs):
@@ -365,7 +395,7 @@ if __name__ == "__main__":
     # plt.xlabel("Epoch")
     # plt.ylabel("Learning Rate")
     # plt.savefig("lr_schedule.png")
-    train(trainer)
+    # train(trainer)
     inference(trainer, 
               state_dict_path, 
               outputPath=rf"{output_folder}/outputs/pred_segmentations_cropped",

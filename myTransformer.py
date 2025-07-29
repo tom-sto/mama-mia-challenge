@@ -14,23 +14,25 @@ def subpatchTensor(x: torch.Tensor, subpatchSize: int):
     x = x.permute(0, 2, 3, 4, 1, 5, 6, 7)  # [B, X//subpatchSize, Y//subpatchSize, Z//subpatchSize, C, subpatchSize, subpatchSize, subpatchSize]
     x = x.reshape(B, -1, C, subpatchSize, subpatchSize, subpatchSize)  # [B, N, C, subpatchSize, subpatchSize, subpatchSize]
 
-    numSubpatches = (X // subpatchSize) * (Y // subpatchSize) * (Z // subpatchSize)
+    numSubpatches = ((X // subpatchSize), (Y // subpatchSize), (Z // subpatchSize))
     return x, numSubpatches
 
 # this function undoes subpatching, returning a tensor to its original size
 # (B*N, C, P, P, P) -> (B, C, X, Y, Z)
 # X == Y == Z
 # N == numSubpatches
-def unpatchTensor(x: torch.Tensor, numSubpatches: int):
+def unpatchTensor(x: torch.Tensor, numSubpatches: tuple[int]):
     assert len(x.shape) == 5, f"Expected shape (B*N, C, P, P, P). Got {x.shape}"
+    print(f"Shape x before unpatching: {x.shape}")
+    print(f"num subpatches = {numSubpatches}")
     B_N, C, P, _, _ = x.shape
-    numSubpatchesPerDim = round(numSubpatches ** (1/3))
-    X = Y = Z = P * numSubpatchesPerDim
+    numSubpatchesX, numSubpatchesY, numSubpatchesZ = numSubpatches
+    X, Y, Z = P * numSubpatchesX, P * numSubpatchesY, P * numSubpatchesZ
 
-    B = B_N // numSubpatches
+    B = B_N // (numSubpatchesX * numSubpatchesY * numSubpatchesZ)
 
     # Reshape back to original dimensions
-    x = x.view(B, numSubpatchesPerDim, numSubpatchesPerDim, numSubpatchesPerDim, C, P, P, P)
+    x = x.view(B, numSubpatchesX, numSubpatchesY, numSubpatchesZ, C, P, P, P)
     x = x.permute(0, 4, 1, 5, 2, 6, 3, 7)  # [B, C, X//P, P, Y//P, P, Z//P, P]
     x = x.reshape(B, C, X, Y, Z)  # [B, C, X, Y, Z]
 
@@ -68,7 +70,7 @@ class DeepPatchEmbed3D(nn.Module):
             self.decoder.append(block)
 
 
-    def forward(self, x: torch.Tensor, nSubPatches: int):  # x: [B, N, C, D, H, W]
+    def forward(self, x: torch.Tensor, nSubPatches: tuple[int]):  # x: [B, N, C, D, H, W]
         B, N, C, D, H, W = x.shape
         x = x.reshape(B * N, C, D, H, W)
         # print("\tReshaped x grad_fn:", x.grad_fn)
@@ -120,6 +122,7 @@ class MyTransformer(nn.Module):
         self.channels = channels
         self.inChannels = in_channels
         self.emb_dim = channels[-1]
+        self.patch_size = patch_size
         self.p_split = p_split
 
         nPatientDataInFeatures = 7             # 1 for age (linear), 2 for menopausal status (one-hot), 4 for breast density (one-hot)
@@ -188,13 +191,12 @@ class MyTransformer(nn.Module):
         self.transformer.apply(init_weights_transformer)
 
     def forward(self, x: torch.Tensor, patientData: list = None):
-        # print("X dist:", x.mean(), "+/-", x.std())
-        P = x.shape[-1]
+        # print("X dist:", x.mean(), "+/-", x.std()
         # Embed patches
-        subpatchSize = P // self.p_split       # split each patch into p_split**3 subpatches
+        subpatchSize = self.patch_size // self.p_split       # split each patch into p_split**3 subpatches
         # print("Input x grad:", x.requires_grad)
         x, nSubPatches = subpatchTensor(x, subpatchSize)
-        # print("Subpatched x grad:", x.grad_fn, " - nSubPatches:", nSubPatches)
+        print("Subpatched x shape:", x.shape, " - nSubPatches:", nSubPatches)
         x, skips, (B, N, E, X, Y, Z) = self.patch_embed(x, nSubPatches)  # [B, N, emb_dim]
         # print(B, N, E, X, Y, Z)
         # X, Y, Z should be 1 if the dimensions align well and there are enough conv layers. 

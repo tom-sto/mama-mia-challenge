@@ -1,6 +1,6 @@
 import torch
 from dynamic_network_architectures.architectures.unet import PlainConvUNet
-# from myTransformer import MyTransformer, ClassifierHead
+from myTransformer import MyTransformer, ClassifierHead
 # from stTransformer import TransformerST
 from TransformerTwo import TransformerST
 
@@ -26,15 +26,15 @@ class myUNet(torch.nn.Module):
             decoderStateDict = {k.replace("decoder.", ""): v for k, v in stateDict.items() if "decoder" in k}
             pretrainedModelArch.decoder.load_state_dict(decoderStateDict, strict=False)
 
-        # self.encoder = MyTransformer(expectedPatchSize, expectedChannels, expectedStride, inChannels, num_heads=n_heads, p_split=p_split)
-        self.encoder = TransformerST(expectedPatchSize, expectedChannels, expectedStride, inChannels, transformer_num_heads=8, transformer_num_layers=4)
+        self.encoder = MyTransformer(expectedPatchSize, expectedChannels, expectedStride, inChannels, num_heads=n_heads, p_split=p_split)
+        # self.encoder = TransformerST(expectedPatchSize, expectedChannels, expectedStride, inChannels, transformer_num_heads=8, transformer_num_layers=4)
         self.decoder = pretrainedModelArch.decoder
-        # self.classifier = ClassifierHead(dim=expectedChannels[-1])
+        self.classifier = ClassifierHead(dim=expectedChannels[-1])
 
         self.ret = "seg"
 
     def forward(self, x: torch.Tensor, patientData: list = None):
-        features, skips, cls_token = self.encoder(x)
+        features, skips, cls_token = self.encoder(x, patientData)
         segOut = self.decoder(skips)
 
         # print("Features:", features.shape)
