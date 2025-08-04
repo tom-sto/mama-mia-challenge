@@ -85,6 +85,24 @@ class DeepPatchEmbed3D(nn.Module):
 
         return x, skips, (B, T, N, E, X, Y, Z)
 
+class ClassifierHead(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(dim, 256),
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.Dropout(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
+        )
+
+    def forward(self, x: torch.Tensor):
+        x = x.flatten(1)
+        return self.fc(x) # (B, 1)
 
 class TransformerST(nn.Module):
     def __init__(self,
@@ -97,6 +115,7 @@ class TransformerST(nn.Module):
                  p_split=4):
         super().__init__()
 
+        self.patch_size = patch_size
         self.p_split = p_split
 
         num_patches = round(self.p_split**3)
@@ -105,71 +124,124 @@ class TransformerST(nn.Module):
 
         self.emb_dim = channels[-1]
 
+        nPatientDataInFeatures = 7             # 1 for age (linear), 2 for menopausal status (one-hot), 4 for breast density (one-hot)
+        self.nPatientDataOutFeatures = transformer_num_heads         # needs to be divisible by num_heads
+        self.patientDataEmbed = nn.Linear(nPatientDataInFeatures, self.nPatientDataOutFeatures)
+
         expectedXYZ = patch_size
         for _ in range(len(channels) + 1):
             expectedXYZ = max(round(expectedXYZ / 2), 1)
 
         self.patch_embed = DeepPatchEmbed3D(channels, strides)
+        self.cls_token   = nn.Parameter(torch.randn((1, 1, num_phases, self.emb_dim + self.nPatientDataOutFeatures)))
+        self.pos_embed   = nn.Parameter(torch.randn((1, num_patches * round(expectedXYZ**3) + 1, num_phases, self.emb_dim + self.nPatientDataOutFeatures)))
         
-        self.pos_embed      = nn.Parameter(torch.randn((1, num_patches * round(expectedXYZ**3), num_phases, self.emb_dim)))
+        ageMin = 21
+        ageMax = 77
+        self.ageEncode  = lambda x: torch.tensor([(x - ageMin) / (ageMax - ageMin)], dtype=torch.float32) if x is not None \
+            else torch.tensor([0.5], dtype=torch.float32)   # normalize age to [0, 1] range, default to 0.5 if None
+        self.menoEncode = lambda x: torch.tensor([1, 0]) if x == "pre" \
+            else torch.tensor([0, 1]) if x == "post" \
+            else torch.tensor([0, 0])
+        self.densityEncode = lambda x: torch.tensor([1, 0, 0, 0]) if x == "a" \
+            else torch.tensor([0, 1, 0, 0]) if x == "b" \
+            else torch.tensor([0, 0, 1, 0]) if x == "c" \
+            else torch.tensor([0, 0, 0, 1]) if x == "d" \
+            else torch.tensor([0, 0, 0, 0])
 
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.emb_dim,
+            d_model=self.emb_dim + self.nPatientDataOutFeatures,
             nhead=transformer_num_heads,
-            dim_feedforward=(self.emb_dim) * 4,
+            dim_feedforward=(self.emb_dim + self.nPatientDataOutFeatures) * 4,
             batch_first=True
         )
 
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_num_layers)
+        self.transformerT = nn.TransformerEncoder(encoder_layer, num_layers=transformer_num_layers)
+        self.transformerS = nn.TransformerEncoder(encoder_layer, num_layers=transformer_num_layers)
 
+        self.fc_to_patches = nn.Linear(self.emb_dim + self.nPatientDataOutFeatures, self.emb_dim)
         self.temporal_proj = nn.Linear(self.num_phases, 1)
 
-    def forward(self, x: torch.Tensor):
-        # print(x.shape)      # [B, T, X, Y, Z]
+        self._initialize_weights()
 
-        P = x.shape[-1]
-        # Embed patches
-        subpatchSize = P // self.p_split
+    def _initialize_weights(self):
+        # Initialize DeepPatchEmbed3D
+        def init_weights_deep_patch_embed(module):
+            if isinstance(module, nn.Conv3d):
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.BatchNorm3d):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+
+        self.patch_embed.apply(init_weights_deep_patch_embed)
+
+        # Initialize Transformer
+        def init_weights_transformer(module):
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+
+        self.transformerT.apply(init_weights_transformer)
+        self.transformerS.apply(init_weights_transformer)
+    
+    def forward(self, x: torch.Tensor, patientData: list[dict] = None):
+        subpatchSize = self.patch_size // self.p_split
         
         x, skips, (B, T, N, E, X, Y, Z) = self.patch_embed(x, subpatchSize)  # [B, N*X*Y*Z, T, E]
 
+        patientData_emb = torch.zeros(B, N*X*Y*Z, T, self.patientDataEmbed.out_features, device=x.device)      # [B, N, npatientDataOutFeatures]
+
+        if patientData is None:
+            patientData = [{'age': None, 'menopausal_status': None, 'breast_density': None} for _ in range(B)]
+
+        # print(patientData)
+        for idx, md in enumerate(patientData):
+            age = md['age']
+            menopausal_status = md['menopausal_status']
+            breast_density = md['breast_density']
+            age_emb = self.ageEncode(age).to(x.device)
+            meno_emb = self.menoEncode(menopausal_status).to(x.device)
+            density_emb = self.densityEncode(breast_density).to(x.device)
+            concat = torch.cat((age_emb, meno_emb, density_emb), dim=0).unsqueeze(0)  # [1, npatientDataInFeatures]
+            concat: torch.Tensor = self.patientDataEmbed(concat)  # [1, npatientDataOutFeatures]
+            patientData_emb[idx] += concat.repeat(N*X*Y*Z, T, 1)  # [B, N*X*Y*Z, T, npatientDataOutFeatures]
+
+        x = torch.cat((x, patientData_emb), dim=-1)  # [B, N*X*Y*Z, T, E + npatientDataOutFeatures]
+
+        # prepend CLS token for classification prediction
+        tok = self.cls_token.expand(B, -1, -1, -1)
+        x = torch.cat((tok, x), dim=1)      # [B, N*X*Y*Z + 1, T, E + npatientDataOutFeatures]
+
         x = x + self.pos_embed
 
-        # print(f"embedded x shape: {x.shape}")
-
         # temporal transformer first
-        x = self.transformer(x.reshape(-1, T, E))       # [B*N*X*Y*Z, T, E]
+        x = self.transformerT(x.reshape(-1, T, E + self.nPatientDataOutFeatures))       # [B*(N*X*Y*Z + 1), T, E + npatientDataOutFeatures]
 
-        x = x.reshape(B, N*X*Y*Z, T, E)
-        x = x.permute(0, 1, 3, 2)           # [B, N*X*Y*Z, E, T]
-        x = self.temporal_proj(x)           # [B, N*X*Y*Z, E, 1]
-        x = x.squeeze(dim=-1)                     # [B, N*X*Y*Z, E]
-        # print(f"temporally projected x: {x.shape}")
+        x = x.reshape(B, N*X*Y*Z + 1, T, E + self.nPatientDataOutFeatures)
+        x = x.permute(0, 1, 3, 2)           # [B, N*X*Y*Z + 1, E + npatientDataOutFeatures, T]
+        x = self.temporal_proj(x)           # [B, N*X*Y*Z + 1, E + npatientDataOutFeatures, 1]
+        x = x.squeeze(dim=-1)               # [B, N*X*Y*Z + 1, E + npatientDataOutFeatures]
 
         # then spatial transformer
-        x = self.transformer(x)             # [B, N*X*Y*Z, E]
-
-        # print(f"x shape after transformer: {x.shape}")
-
-        tf_skip = x.permute(0, 2, 1)        # [B, E, N*X*Y*Z]
-        tf_skip = tf_skip.reshape(B, E, self.p_split*X, self.p_split*Y, self.p_split*Z)
-        # print("tf_skip size", tf_skip.shape)
+        x = self.transformerS(x)            # [B, N*X*Y*Z + 1, E + npatientDataOutFeatures]
+       
+        x = self.fc_to_patches(x)  # [B, N*X*Y*Z + 1, E]
+        cls_token = x[:, 0]   # [B, 1, E].
 
         # reshape to match conv shape
-        x = x.reshape(B*N, X, Y, Z, E)
+        x = x[:, 1:].reshape(B*N, X, Y, Z, E)
         x = x.permute(0, 4, 1, 2, 3)
         features = unpatchTensor(x, self.num_patches)       # [B, E, P, P, P]
-        # print(f"Unpatched features shape: {features.shape}")
 
-        # print("x shape before reshape:", x.shape)
-        # print("Final x grad_fn:", x.grad_fn)
+        skips[-1] = features
 
-        # print("Final x shape:", x.shape)
-        # print("Final skips shape:", [s.shape for s in skips])
-        # print("Final tokens shape:", tokens.shape)
-        # print("x == last layer?", torch.all(x == tf_skips[-1]))
-
-        return features, skips, None
+        return features, skips, cls_token
 
 
 

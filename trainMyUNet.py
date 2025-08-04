@@ -119,7 +119,7 @@ def setupTrainer(plansJSONPath: str,
     trainer.num_iterations_per_epoch = 200
     trainer.num_val_iterations_per_epoch = 50
     trainer.num_epochs = 1000
-    trainer.pretrainSegmentation = trainer.num_epochs
+    trainer.pretrainSegmentation = round(trainer.num_epochs * 0.75)
     trainer.initial_lr = 1e-5
     trainer.initialize()
 
@@ -133,16 +133,18 @@ def setupTrainer(plansJSONPath: str,
                    p_split=p_split).to(device)
     trainer.network = model
 
-    non_transformer_params = [
-        param for name, param in model.encoder.named_parameters()
-        if not name.startswith("transformer")
-    ]
+    # non_transformer_params = [
+    #     param for name, param in model.encoder.named_parameters()
+    #     if not name.startswith("transformer")
+    # ]
     # change optimizer and scheduler
-    trainer.optimizer = torch.optim.AdamW([
-        {'params': non_transformer_params, 'lr': trainer.initial_lr * 20, 'weight_decay': 1e-4},
-        {'params': model.encoder.transformer.parameters(), 'lr': trainer.initial_lr, 'weight_decay': 1e-3},
-        {'params': model.decoder.parameters(), 'lr': trainer.initial_lr,  'weight_decay': 1e-4}
-    ])
+    # trainer.optimizer = torch.optim.AdamW([
+    #     {'params': non_transformer_params, 'lr': trainer.initial_lr * 20, 'weight_decay': 1e-4},
+    #     {'params': model.encoder.transformerS.parameters(), 'lr': trainer.initial_lr, 'weight_decay': 1e-3},
+    #     {'params': model.encoder.transformerT.parameters(), 'lr': trainer.initial_lr, 'weight_decay': 1e-3},
+    #     {'params': model.decoder.parameters(), 'lr': trainer.initial_lr,  'weight_decay': 1e-4}
+    # ])
+    trainer.optimizer = torch.optim.AdamW(params=model.parameters(), lr=trainer.initial_lr, weight_decay=1e-4)
     trainer.aggregator = UPGrad()
 
     num_training_steps = trainer.num_epochs           # scheduler steps every epoch, not every batch
@@ -288,8 +290,8 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
 
     from score_task1 import doScoring
     doScoring(os.path.dirname(outputPath))
-    # import pdb, pandas as pd, SimpleITK as sitk
-    # pdb.set_trace()
+    import pdb, pandas as pd, SimpleITK as sitk
+    pdb.set_trace()
 
     # # do pCR inference
     # trainer.network.ret = "probability"
@@ -343,7 +345,7 @@ if __name__ == "__main__":
     # device = torch.device("cpu")    # Joe is using the GPU rn :p
     print(f"Using device: {device}")
     fold = 4
-    tag = "_transformer_st"
+    tag = "_t_then_s_two_transformers"
     trainer = setupTrainer(plansPath, 
                            "3d_fullres", 
                            fold, 
