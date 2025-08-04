@@ -116,9 +116,9 @@ def setupTrainer(plansJSONPath: str,
         nInChannels = len(datasetInfo["channel_names"])
 
     trainer = nnUNetTrainer(plans, config, fold, datasetInfo, device, tag)
-    trainer.num_iterations_per_epoch = 200
-    trainer.num_val_iterations_per_epoch = 50
-    trainer.num_epochs = 1000
+    trainer.num_iterations_per_epoch = 20
+    trainer.num_val_iterations_per_epoch = 5
+    trainer.num_epochs = 1
     trainer.pretrainSegmentation = trainer.num_epochs
     trainer.initial_lr = 1e-5
     trainer.initialize()
@@ -290,34 +290,7 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
     # doScoring(os.path.dirname(outputPath))
     import pdb, pandas as pd, SimpleITK as sitk
     # pdb.set_trace()
-
-    def pad_to_patch_compatible_size(arr: torch.Tensor, patch_size: int) -> torch.Tensor:
-        """
-        Pads the spatial dimensions of the input tensor evenly with zeros to make them divisible by the patch size.
-
-        Args:
-            arr (torch.Tensor): Input tensor of shape (C, X, Y, Z).
-            patch_size (int): The patch size to make the spatial dimensions divisible by.
-
-        Returns:
-            torch.Tensor: Padded tensor with spatial dimensions divisible by the patch size.
-        """
-        _, x, y, z = arr.shape
-        pad_x = (patch_size - x % patch_size) % patch_size
-        pad_y = (patch_size - y % patch_size) % patch_size
-        pad_z = (patch_size - z % patch_size) % patch_size
-
-        # Calculate padding for each dimension (even padding on both sides)
-        padding = (
-            pad_z // 2, pad_z - pad_z // 2,  # Z dimension
-            pad_y // 2, pad_y - pad_y // 2,  # Y dimension
-            pad_x // 2, pad_x - pad_x // 2   # X dimension
-        )
-
-        # Apply padding
-        padded_arr = torch.nn.functional.pad(arr, padding, mode='constant', value=0)
-        return padded_arr
-
+    
     # do pCR inference
     trainer.network.ret = "probability"
     out_df = pd.DataFrame(columns=['patient_id', 'pcr_prob'])
@@ -364,9 +337,9 @@ def inference(trainer: nnUNetTrainer, state_dict_path: str, outputPath: str = ".
 
 if __name__ == "__main__":
     writer = SummaryWriter()
-    datasetName = "Dataset104_cropped_3ch_breast"
+    datasetName = "Dataset106_cropped_Xch_breast_no_norm"
     basepath = rf"{os.environ["nnUNet_preprocessed"]}/{datasetName}"
-    pretrainedModelPath = "nnunet_pretrained_weights_64_best.pth"
+    pretrainedModelPath = "pretrained_weights/nnunet_pretrained_weights_64_best.pth"
     plansPath = rf"{basepath}/nnUNetPlans.json"
     datasetPath = rf"{basepath}/dataset.json"
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -395,7 +368,7 @@ if __name__ == "__main__":
     # plt.xlabel("Epoch")
     # plt.ylabel("Learning Rate")
     # plt.savefig("lr_schedule.png")
-    # train(trainer)
+    train(trainer)
     inference(trainer, 
               state_dict_path, 
               outputPath=rf"{output_folder}/outputs/pred_segmentations_cropped",

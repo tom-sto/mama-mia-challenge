@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from math import log
 
 def subpatchTensor(x: torch.Tensor, subpatchSize: int):
     assert len(x.shape) == 5, f"Expected shape (B, C, X, Y, Z). Got: {x.shape}"
@@ -114,8 +115,7 @@ class MyTransformer(nn.Module):
         strides,
         in_channels,
         transformer_depth=6,    # make this match num layers in decoder for skips: 6
-        num_heads=10,
-        p_split=4
+        num_heads=10
     ):
         super().__init__()
 
@@ -123,7 +123,6 @@ class MyTransformer(nn.Module):
         self.inChannels = in_channels
         self.emb_dim = channels[-1]
         self.patch_size = patch_size
-        self.p_split = p_split
 
         nPatientDataInFeatures = 7             # 1 for age (linear), 2 for menopausal status (one-hot), 4 for breast density (one-hot)
         nPatientDataOutFeatures = num_heads    # needs to be divisible by num_heads
@@ -135,9 +134,9 @@ class MyTransformer(nn.Module):
 
         self.patch_embed = DeepPatchEmbed3D(channels, in_channels, strides)
         self.cls_token = nn.Parameter(torch.randn((1, 1, self.emb_dim + nPatientDataOutFeatures)))
-        self.pos_embed = nn.Parameter(torch.randn((1, 
-                                                   round(p_split**3) * round(expectedXYZ**3) + 1, 
-                                                   self.emb_dim + nPatientDataOutFeatures)))  # learnable position embedding
+        self.phase_pos_embed = nn.Embedding(6, self.emb_dim + nPatientDataOutFeatures)  # learnable position embedding
+        # patch positional embedding will be done with sinusoidal encoding
+
         self.skip_weights = nn.Parameter(torch.randn((len(self.channels) - 2,)))  # learnable skip connection weights
 
         ageMin = 21
@@ -189,6 +188,15 @@ class MyTransformer(nn.Module):
                 nn.init.constant_(module.bias, 0)
 
         self.transformer.apply(init_weights_transformer)
+
+    def get_sinusoid_encoding_table(self, length, dim, device):
+        position = torch.arange(length, dtype=torch.float, device=device).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, dim, 2, device=device).float() * -(log(10000.0) / dim))
+        sinusoid = torch.zeros(length, dim, device=device)
+        sinusoid[:, 0::2] = torch.sin(position * div_term)
+        sinusoid[:, 1::2] = torch.cos(position * div_term)
+        return sinusoid  # [length, dim]
+
 
     def forward(self, x: torch.Tensor, patientData: list = None):
         # print("X dist:", x.mean(), "+/-", x.std()
