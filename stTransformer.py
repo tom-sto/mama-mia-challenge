@@ -42,6 +42,7 @@ def st_parallel():
     out = V @ attn
     print(f"out: {out.shape}")
 
+# when running attention on one, assume the other is the "embedding" of that sequence
 def st_sequential():
     n_heads = 2
     n_patches = 10

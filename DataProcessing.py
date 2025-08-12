@@ -6,8 +6,22 @@ import SimpleITK as sitk
 from functools import partial
 from helpers import PATCH_SIZE, NUM_PATCHES
 
+''' 
+data {
+    tr/val/ts: {                 ("training", "validation", "testing")
+        patient_id: {       e.g. ("duke_002", "ispy2_981664")
+            "seg":  [function handles] to get ground truth binary tumor segmentation + patch indices
+            "dmap": [function handles] to get signed distance map of tumor segmentation + patch indices
+            "phase" {
+                phase_num: [function handles] to get DCE-MRI for this phase and patient + patch indices
+            }
+        }
+    }
+}
+'''
 def GetData(parentDir: str, device: torch.device):
-    # assume this dir is allTheData with the 4 pre-processed data folders
+    print("Collecting data...")
+    # assume this dir is E:\MAMA-MIA\my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm
     data = {}
 
     np.random.seed(420)
@@ -27,19 +41,20 @@ def GetData(parentDir: str, device: torch.device):
         trtsDir = os.path.join(parentDir, trts)
         for pid in ids:
             data[trts][pid] = {}
-            imgs = glob.glob(os.path.join(trtsDir, f"{pid}*.nii.gz"))
-            numPhases = len(imgs) - 2
+            data[trts][pid]["phase"] = {}
+            imgs = glob.glob(os.path.join(trtsDir, f"{pid}*.zarr"))
             for img in imgs:
                 if "seg" in img:
-                    data[trts][pid]["seg"] = {i: loadImagePatches(img, device, PATCH_SIZE, NUM_PATCHES) for i in range(numPhases)}
+                    data[trts][pid]["seg"] = loadImagePatches(img, device, PATCH_SIZE, retIndices=True)
                 elif "dmap" in img:
-                    data[trts][pid]["img"] = {i: loadImagePatches(img, device, PATCH_SIZE, NUM_PATCHES) for i in range(numPhases)}
+                    data[trts][pid]["dmap"] = loadImagePatches(img, device, PATCH_SIZE)
                 else:
                     p = int(img.split('.')[0][-1])
-                    data[trts][pid]["phase"] = {p: loadImagePatches(img, device, PATCH_SIZE, NUM_PATCHES)}
-
-
-    for patient_id in data["training"].keys():
+                    data[trts][pid]["phase"][p] = loadImagePatches(img, device, PATCH_SIZE)
+    
+    data["validation"] = {}
+    trainingKeys = list(data["training"].keys())
+    for patient_id in trainingKeys:
         if np.random.random() > 0.9:        # move 10% of training cases to validation
             data["validation"][patient_id] = data["training"][patient_id]
             del data["training"][patient_id]
@@ -73,7 +88,7 @@ def chunkToPatches(chunk: torch.Tensor, patchSize: int):
     return patches.to(chunk.device)
 
 
-def loadChunk(zarrArray: zarr.Array, device: torch.device, patchSize: int, chunkSize: tuple[int], startIndex: tuple[int]):
+def loadChunk(zarrArray: zarr.Array, device: torch.device, patchSize: int, chunkSize: tuple[int], startIndex: tuple[int], retIndices: bool = False):
     assert len(zarrArray.shape) == 3, f"Expected zarrArray to be 3D image with no channels, got shape {zarrArray.shape}"
     X, Y, Z = zarrArray.shape
     pX = X // patchSize
@@ -90,6 +105,8 @@ def loadChunk(zarrArray: zarr.Array, device: torch.device, patchSize: int, chunk
     chunk = torch.tensor(zarrArray[xStart:xEnd, yStart:yEnd, zStart:zEnd]).to(device)
     patches = chunkToPatches(chunk, patchSize)
 
+    if not retIndices: return patches
+
     patchCoords = []
     for i in range(chunkSize[0]):
         for j in range(chunkSize[1]):
@@ -103,47 +120,55 @@ def loadChunk(zarrArray: zarr.Array, device: torch.device, patchSize: int, chunk
 # i feel very clever for this approach ;)
 # Store partial handles in a data structure
 # and then run them only when I need them (making sure to delete the arrays after to save memory)
-def loadImagePatches(path: str, device: torch.device, patchSize: int = 32, chunkSize: tuple[int] = (4, 4, 2), overlap=2):
+def loadImagePatches(path: str, device: torch.device, patchSize: int = 32, chunkSize: tuple[int] = (4, 4, 2), retIndices: bool = False):
     assert path.endswith('.zarr'), "Only .zarr files are supported."
 
-    n = int(overlap)
-    assert np.all(np.array(chunkSize) >= n), "Need chunk size to be at least a big as expected overlap."
-
     zarrArray = zarr.open(path, mode='r')
-    X, Y, Z = zarrArray.shape
-    print(f"Image is {X} x {Y} x {Z}")
-    pX = X // patchSize
+    try:
+        X, Y, Z = zarrArray.shape
+    except:
+        print(f"failed on path {path}")
+        return None, None
+    
+    # These shouldn't have any remainder since the data was padded to fit the 32 patch size!
+    pX = X // patchSize         # num patches in x axis of entire image
     pY = Y // patchSize
     pZ = Z // patchSize
 
-    nX = max(1, pX // (chunkSize[0] // n))
-    nX = max(1, nX - (1 - pX % nX))
+    chunkIndices = getChunkIndices(pX, pY, pZ, chunkSize)
+
+    handles = [partial(loadChunk, zarrArray, device, patchSize, chunkSize, chidx, retIndices)
+               for chidx in chunkIndices]
+    
+    if retIndices: return handles, chunkIndices
+    return handles
+
+def getChunkIndices(pX, pY, pZ, chunkSize):
+    n = 2       # overlap chunks by #patches/2 in each direction
+    assert np.all(np.array(chunkSize) >= n), "Need chunk size to be at least a big as expected overlap."
+    assert np.all(np.array(chunkSize) % n == 0), f"Expected chunk size to be divisible by overlap ({n}) in all directions."
+
+    nX = max(1, pX // (chunkSize[0] // n))      # Num chunks in x axis, overlapping by half
+    nX = max(1, nX - (1 - pX % nX))             # Must be at least 1; if ^^^ has no remainder, subtract 1
     nY = max(1, pY // (chunkSize[1] // n))
     nY = max(1, nY - (1 - pY % nY))
     nZ = max(1, pZ // (chunkSize[2] // n))
     nZ = max(1, nZ - (1 - pZ % nZ))
-    indices = []
+    indices = []                                # this method is called getChunkIndices but these are the indices w.r.t. patches in the chunk
     for i in range(nX):
-        x = min(i * chunkSize[0] / n, pX - chunkSize[0])
-        x = max(x, 0)
+        x = min(i * chunkSize[0] / n, pX - chunkSize[0])    # make sure we don't index out-of-bounds! last chunk of odd-#patches images will have more overlap on this axis
+        x = max(x, 0)                                       # don't use negative indices please.
         for j in range(nY):
-            y = min(j * chunkSize[1]// n, pY - chunkSize[1])
+            y = min(j * chunkSize[1] / n, pY - chunkSize[1])
             y = max(y, 0)
             for k in range(nZ):
                 z = min(k * chunkSize[2] / n, pZ - chunkSize[2])
                 z = max(z, 0)
                 indices.append((int(x), int(y), int(z)))
+    
+    return indices                              # if you want actual coordinates, just multiply each index by patch size!
 
-    handles = []
-    for idx in indices:
-        handles.append(partial(loadChunk, zarrArray, device, patchSize, chunkSize, idx))
-        
-    return handles
-
-def reconstructImageFromPatches(patches: list[torch.Tensor], patchCoords: list[list[torch.Tensor]], patchSize: int, device=None):
-    """
-    Reconstruct the full image from overlapping chunks using sliding window logic.
-    """
+def reconstructImageFromPatches(patches: list[torch.Tensor], patchCoords: list[list[torch.Tensor]], patchSize: int, device: torch.device=None):
     # Determine the target dimensions from the maximum coordinates in patchCoords
     max_coords = torch.max(torch.cat([coords for coords in patchCoords]), dim=0).values
     target_dims = (max_coords + 1) * patchSize
@@ -151,7 +176,7 @@ def reconstructImageFromPatches(patches: list[torch.Tensor], patchCoords: list[l
 
     # Initialize the reconstructed image and a weight map for averaging overlaps
     reconstructed_image: torch.Tensor = torch.zeros(target_dims, device=device, dtype=float)
-    weight_map = torch.zeros(target_dims, device=device, dtype=float)
+    weight_map: torch.Tensor = torch.zeros(target_dims, device=device, dtype=float)
 
     for chunk, coords in zip(patches, patchCoords):
         for patch, coord in zip(chunk, coords):
@@ -204,7 +229,7 @@ if __name__ == "__main__":
     patchSize = 32
     dev = torch.device("cuda")
 
-    handles = loadImagePatches(path, dev, patchSize=patchSize)
+    handles, indices = loadImagePatches(path, dev, patchSize=patchSize)
 
     allPatches  = []
     allCoords   = []
