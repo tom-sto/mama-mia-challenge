@@ -26,10 +26,7 @@ class CustomDataset(Dataset):
 
             images[imageType] = {}
             match imageType:
-                case "seg":
-                    handles, indices = self.data[patientID][imageType]
-                    images[imageType] = [(h, i) for i, h, in zip(indices, handles)]
-                case "dmap":
+                case "seg" | "dmap":
                     images[imageType] = self.data[patientID][imageType]
                 case "phase":
                     for phase in self.data[patientID][imageType].keys():
@@ -54,23 +51,24 @@ class CustomSampler(Sampler):
 
     def __len__(self):
         return len(self.indices)
-    
-def GetDataloaders(dataDir: str, device: torch.device, shuffle=True):
-    my_collate = lambda x: x[0]         # Assume batch size == 1. unpack from singleton list
-    data = GetData(dataDir, device)
+
+# TODO: Make batch sampler that takes patients with matching # phases
+def GetDataloaders(dataDir: str, device: torch.device, batchSize: int = 1, shuffle=True, test=False):
+    my_collate = lambda x: x[0]         # unpack from singleton list
+    data = GetData(dataDir, device, test=test)
     trDataset = CustomDataset(data=data["training"])
     trPIDs = list(data["training"].keys())
     trSampler = CustomSampler(trPIDs, shuffle=shuffle)
-    trDataloader = torch.utils.data.DataLoader(trDataset, sampler=trSampler, collate_fn=my_collate)
+    trDataloader = torch.utils.data.DataLoader(trDataset, batch_size=batchSize, sampler=trSampler, collate_fn=my_collate)
     
     vlDataset = CustomDataset(data=data["validation"])
     vlPIDs = list(data["validation"].keys())
     vlSampler = CustomSampler(vlPIDs, shuffle=shuffle)
-    vlDataloader = torch.utils.data.DataLoader(vlDataset, sampler=vlSampler, collate_fn=my_collate)
+    vlDataloader = torch.utils.data.DataLoader(vlDataset, batch_size=batchSize, sampler=vlSampler, collate_fn=my_collate)
     
     tsDataset = CustomDataset(data=data["testing"])
     tsPIDs = list(data["testing"].keys())
     tsSampler = CustomSampler(tsPIDs, shuffle=shuffle)
-    tsDataloader = torch.utils.data.DataLoader(tsDataset, sampler=tsSampler, collate_fn=my_collate)
+    tsDataloader = torch.utils.data.DataLoader(tsDataset, batch_size=batchSize, sampler=tsSampler, collate_fn=my_collate)
     
     return trDataloader, vlDataloader, tsDataloader

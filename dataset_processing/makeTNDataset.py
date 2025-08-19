@@ -96,7 +96,7 @@ def do_training_case(patient_id, TR_DIR, PP_DIR, LB_DIR):
 
     for file_path in glob.glob(os.path.join(TR_DIR, patient_id + "*.nii.gz")):
         outPath = join(PP_DIR, "training", file_path.split("\\")[-1][:-7])
-        img = sitk.ReadImage(file_path)
+        img = sitk.Cast(sitk.ReadImage(file_path), sitk.sitkFloat32)
         resImg = reorient_and_resample(img)
         paddedImg = pad_to_patch_compatible_size(resImg)
 
@@ -135,7 +135,7 @@ def do_testing_case(patient_id, TS_DIR, PP_DIR, LB_DIR):
 
     for file_path in glob.glob(os.path.join(TS_DIR, patient_id + "*.nii.gz")):
         outPath = join(PP_DIR, "testing", file_path.split("\\")[-1][:-7])
-        img = sitk.ReadImage(file_path)
+        img = sitk.Cast(sitk.ReadImage(file_path), sitk.sitkFloat32)
         resImg = reorient_and_resample(img)
         paddedImg = pad_to_patch_compatible_size(resImg)
 

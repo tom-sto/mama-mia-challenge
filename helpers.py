@@ -1,6 +1,14 @@
+import torch
+import pandas as pd
+
 IMAGE_TYPES = ("phase", "seg", "dmap")
 PATCH_SIZE  = 32
-NUM_PATCHES = 32
+CHUNK_SIZE  = (9, 12, 9)
+
+def Mean(l: list):
+    if len(l) == 0:
+        return -1
+    return sum(l) / len(l)
 
 def FormatSeconds(s):
     if s < 60:
@@ -17,3 +25,71 @@ def FormatSeconds(s):
     days = hours // 24
     hours %= 24
     return f"{days:.0f} day{"s" if days > 1 else ""}, {hours:.0f} hour{"s" if hours > 1 else ""}, {minutes:.0f} minute{"s" if minutes > 1 else ""}, and {seconds:.4f} seconds"
+
+# adapted from PE formula in Viswani et. al. (2023)
+def PositionEncoding(seq: torch.Tensor, dim: int):
+    position = seq.unsqueeze(-1)                                # [..., N, 1]
+
+    i = torch.arange(0, dim, 2, device=position.device)                  # [E/2]
+    div_term = 1.0 / (10000 ** (i / dim))
+
+    pos = position * div_term                                   # [..., N, E/2]
+    pos_enc = torch.empty(*seq.shape, dim, device=position.device)       # [..., N, E]
+    pos_enc[..., 0::2] = torch.sin(pos)                         # [..., N, E/2] for even emb dims
+    pos_enc[..., 1::2] = torch.cos(pos)                         # [..., N, E/2] for odd emb dims
+    
+    return pos_enc                                              # [..., N, E]
+
+def PositionEncoding3D(seq: torch.Tensor, dim: int):
+    # since we want the embedding dim to not be super constrained, we split the dims as evenly as we can
+    # give the z-axis the short end of the stick if need be, then y-axis
+
+    x, y, z = seq[..., 0], seq[..., 1], seq[..., 2]
+    d = dim // 3
+    dX, dY, dZ = d, d, d
+    if dim % d == 1:
+        dX += 1
+    elif dim % d == 2:
+        dX += 1
+        dY += 1
+
+    assert dX + dY + dZ == dim, f"You did the math wrong dummy! {dX} + {dY} + {dZ} != {dim}"
+    
+    xEnc = PositionEncoding(x, dim=dX)
+    yEnc = PositionEncoding(y, dim=dY)
+    zEnc = PositionEncoding(z, dim=dZ)
+
+    pos_enc = torch.cat([xEnc, yEnc, zEnc], dim=-1)
+    return pos_enc
+
+def CleanPatientData(df: pd.DataFrame, 
+                     patient_ids: list[str], 
+                     columns: list[str] = ["age", 
+                                           "menopause",
+                                           "breast_density",
+                                           "acquisition_times"]):
+    def cleanMenopause(df: pd.DataFrame):
+        df['menopause'] = df['menopause'].fillna('unknown')
+        df['menopause'] = df['menopause'].apply(lambda x: 'pre' if 'peri' in x else x)
+        df['menopause'] = df['menopause'].apply(lambda x: 'post' if 'post' in x else x)
+        df['menopause'] = df['menopause'].apply(lambda x: 'pre' if 'pre' in x else x)
+
+        return df
+
+    df = cleanMenopause(df)
+
+    data = []
+    for pid in patient_ids:
+        md = {}
+        for m in columns:
+            d = df.loc[df["patient_id"] == pid.upper(), m].item()
+            if pd.isna(d):
+                d = None
+            elif m == "acquisition_times":
+                d = eval(d)
+            md[m] = d
+        data.append(md)
+
+    # data = [{m: df.loc[df["patient_id"] == pid.upper(), m] for m in columns} for pid in patient_ids]
+
+    return data

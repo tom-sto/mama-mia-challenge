@@ -4,7 +4,7 @@ import zarr
 import numpy as np
 import SimpleITK as sitk
 from functools import partial
-from helpers import PATCH_SIZE, NUM_PATCHES
+from helpers import PATCH_SIZE, CHUNK_SIZE
 
 ''' 
 data {
@@ -19,7 +19,7 @@ data {
     }
 }
 '''
-def GetData(parentDir: str, device: torch.device):
+def GetData(parentDir: str, device: torch.device, test: bool = False):
     print("Collecting data...")
     # assume this dir is E:\MAMA-MIA\my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm
     data = {}
@@ -34,6 +34,8 @@ def GetData(parentDir: str, device: torch.device):
             sp = img.split("_")
             patient_id = sp[0] + "_" + sp[1]
             pids[trts].add(patient_id)
+            if test and len(pids[trts]) >= 50:        # take a much smaller subset of images for testing the model so I dont have to wait 2 minutes every time
+                break
     
     for trts in pids.keys():
         data[trts] = {}
@@ -45,12 +47,12 @@ def GetData(parentDir: str, device: torch.device):
             imgs = glob.glob(os.path.join(trtsDir, f"{pid}*.zarr"))
             for img in imgs:
                 if "seg" in img:
-                    data[trts][pid]["seg"] = loadImagePatches(img, device, PATCH_SIZE, retIndices=True)
+                    data[trts][pid]["seg"] = loadImagePatches(img, device, PATCH_SIZE, CHUNK_SIZE, retIndices=True)
                 elif "dmap" in img:
-                    data[trts][pid]["dmap"] = loadImagePatches(img, device, PATCH_SIZE)
+                    data[trts][pid]["dmap"] = loadImagePatches(img, device, PATCH_SIZE, CHUNK_SIZE)
                 else:
                     p = int(img.split('.')[0][-1])
-                    data[trts][pid]["phase"][p] = loadImagePatches(img, device, PATCH_SIZE)
+                    data[trts][pid]["phase"][p] = loadImagePatches(img, device, PATCH_SIZE, CHUNK_SIZE)
     
     data["validation"] = {}
     trainingKeys = list(data["training"].keys())
@@ -107,15 +109,21 @@ def loadChunk(zarrArray: zarr.Array, device: torch.device, patchSize: int, chunk
 
     if not retIndices: return patches
 
-    patchCoords = []
-    for i in range(chunkSize[0]):
-        for j in range(chunkSize[1]):
-            for k in range(chunkSize[2]):
+    patchIdxs = []
+    for i in range(min(chunkSize[0], pX)):
+        for j in range(min(chunkSize[1], pY)):
+            for k in range(min(chunkSize[2], pZ)):
                 coord = (startIndex[0] + i, startIndex[1] + j, startIndex[2] + k)
-                patchCoords.append(coord)
+                # idx = getPatchIndexFromCoord(coord, pY, pZ)
+                patchIdxs.append(coord)
 
-    patchCoords = torch.tensor(patchCoords).to(device)  # Shape: (numPatches, 3)
-    return patches, patchCoords
+    patchIdxs = torch.tensor(patchIdxs).to(device)  # Shape: (numPatches)
+
+    assert len(patches) == len(patchIdxs), "Patch indexing is wrong!"
+    return patches, patchIdxs
+
+def getPatchIndexFromCoord(index: tuple[int], pY, pZ):
+    return index[2] + index[1]*pZ + index[0]*pZ*pY
 
 # i feel very clever for this approach ;)
 # Store partial handles in a data structure
@@ -140,10 +148,13 @@ def loadImagePatches(path: str, device: torch.device, patchSize: int = 32, chunk
     handles = [partial(loadChunk, zarrArray, device, patchSize, chunkSize, chidx, retIndices)
                for chidx in chunkIndices]
     
-    if retIndices: return handles, chunkIndices
     return handles
 
 def getChunkIndices(pX, pY, pZ, chunkSize):
+    # if we have a chunk size greater than or equal to image, we only need one chunk
+    if pX <= chunkSize[0] and pY <= chunkSize[1] and pZ <= chunkSize[2]:
+        return [(0, 0, 0)]
+
     n = 2       # overlap chunks by #patches/2 in each direction
     assert np.all(np.array(chunkSize) >= n), "Need chunk size to be at least a big as expected overlap."
     assert np.all(np.array(chunkSize) % n == 0), f"Expected chunk size to be divisible by overlap ({n}) in all directions."
@@ -170,7 +181,7 @@ def getChunkIndices(pX, pY, pZ, chunkSize):
 
 def reconstructImageFromPatches(patches: list[torch.Tensor], patchCoords: list[list[torch.Tensor]], patchSize: int, device: torch.device=None):
     # Determine the target dimensions from the maximum coordinates in patchCoords
-    max_coords = torch.max(torch.cat([coords for coords in patchCoords]), dim=0).values
+    max_coords = torch.max(torch.cat(patchCoords), dim=0).values
     target_dims = (max_coords + 1) * patchSize
     target_dims = target_dims.tolist()
 
@@ -192,6 +203,43 @@ def reconstructImageFromPatches(patches: list[torch.Tensor], patchCoords: list[l
     reconstructed_image /= torch.clamp(weight_map, min=1)
 
     return reconstructed_image.to(chunk.dtype)
+
+def subpatchTensor(x: torch.Tensor, subpatchSize: int):
+    assert len(x.shape) == 5, f"Expected shape (B, C, X, Y, Z). Got: {x.shape}"
+    B, T, X, Y, Z = x.shape
+    assert X % subpatchSize == 0 and Y % subpatchSize == 0 and Z % subpatchSize == 0, \
+        "Input dimensions must be divisible by subpatchSize"
+
+    # Reshape into subpatches
+    x = x.unfold(2, subpatchSize, subpatchSize)  # Unfold X
+    x = x.unfold(3, subpatchSize, subpatchSize)  # Unfold Y
+    x = x.unfold(4, subpatchSize, subpatchSize)  # Unfold Z
+    x = x.permute(0, 2, 3, 4, 1, 5, 6, 7)  # [B, X//subpatchSize, Y//subpatchSize, Z//subpatchSize, C, subpatchSize, subpatchSize, subpatchSize]
+    x = x.reshape(B, -1, T, subpatchSize, subpatchSize, subpatchSize)  # [B, N, T, subpatchSize, subpatchSize, subpatchSize]
+    x = x.unsqueeze(3)          # Add a singleton channel dimension for patch embedding: [B, N, T, 1, subpatchSize, subpatchSize, subpatchSize]
+    x = x.permute(0, 2, 1, 3, 4, 5, 6)      # [B, T, N, 1, subpatchSize, subpatchSize, subpatchSize]
+
+    numSubpatches = (X // subpatchSize) * (Y // subpatchSize) * (Z // subpatchSize)
+    return x, numSubpatches
+
+# this function undoes subpatching, returning a tensor to its original size
+# (B*N, C, P, P, P) -> (B, C, X, Y, Z)
+# X == Y == Z
+# N == numSubpatches
+def unpatchTensor(x: torch.Tensor, numSubpatches: int):
+    assert len(x.shape) == 5, f"Expected shape (B*N, C, P, P, P). Got {x.shape}"
+    B_N, C, P, _, _ = x.shape
+    numSubpatchesPerDim = round(numSubpatches ** (1/3))
+    X = Y = Z = P * numSubpatchesPerDim
+
+    B = B_N // numSubpatches
+
+    # Reshape back to original dimensions
+    x = x.view(B, numSubpatchesPerDim, numSubpatchesPerDim, numSubpatchesPerDim, C, P, P, P)
+    x = x.permute(0, 4, 1, 5, 2, 6, 3, 7)  # [B, C, X//P, P, Y//P, P, Z//P, P]
+    x = x.reshape(B, C, X, Y, Z)  # [B, C, X, Y, Z]
+
+    return x
 
 def ConvertBinaryNPArrayToImage(ndarr: np.ndarray):
     argmax = np.argmax(ndarr, axis=0)
