@@ -4,7 +4,9 @@
 outputs*
 *submission*
 nnUNet_results
+*Results
 runs
 notebooks
 segData*
 *.pth
+Untitled*
