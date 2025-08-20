@@ -1,5 +1,6 @@
 import torch
 from Transformer import MyTransformerST
+from Bottleneck import *
 from PCRClassifier import ClassifierHead
 from PatchEmbed import PatchEncoder, PatchDecoder
 from AttentionPooling import AttentionPooling
@@ -11,7 +12,9 @@ class MyUNet(torch.nn.Module):
                  expectedStride: list[int] = [2, 2, 2, 2, 2, 2],
                  pretrainedDecoderPath: str = None,
                  nHeads: int = 8,
-                 useSkips: bool = True):
+                 useSkips: bool = True,
+                 bottleneck: str = "TransformerST",
+                 nBottleneckLayers: int = 4):
         super().__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
@@ -26,8 +29,19 @@ class MyUNet(torch.nn.Module):
             decoderStateDict = {k.replace("decoder.", ""): v for k, v in stateDict.items() if "decoder" in k}
             self.decoder.load_state_dict(decoderStateDict, strict=False)
 
-        self.bottleneck = MyTransformerST(expectedPatchSize, expectedChannels, num_heads=nHeads, transformer_num_layers=4)
-        
+        match bottleneck:
+            case "TransformerST":
+                self.bottleneck = MyTransformerST(expectedPatchSize, 
+                                                  expectedChannels, 
+                                                  nHeads=nHeads, 
+                                                  transformer_num_layers=4)
+            case "Conv":
+                self.bottleneck = ConvBottleneck(expectedChannels[-1], 
+                                                 expectedChannels[-1], 
+                                                 nBottleneckLayers, 
+                                                 nHeads)
+            case "None" | _:
+                self.bottleneck = NoBottleneck(expectedChannels[-1], nHeads)
         self.classifier = ClassifierHead(dim=expectedChannels[-1])
 
         self.ret = "all"

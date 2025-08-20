@@ -9,7 +9,7 @@ class MyTransformerST(nn.Module):
     def __init__(self,
                  patch_size,
                  channels,
-                 num_heads=4,
+                 nHeads=4,
                  transformer_num_layers=6,
                  patient_data_path=r"E:\MAMA-MIA\clinical_and_imaging_info.xlsx"):
         super().__init__()
@@ -19,7 +19,7 @@ class MyTransformerST(nn.Module):
         self.emb_dim = channels[-1]
 
         nPatientDataInFeatures = 7             # 1 for age (linear), 2 for menopausal status (one-hot), 4 for breast density (one-hot)
-        self.nPatientDataOutFeatures = num_heads         # needs to be divisible by num_heads
+        self.nPatientDataOutFeatures = nHeads         # needs to be divisible by nHeads
         self.patientDataEmbed = nn.Linear(nPatientDataInFeatures, self.nPatientDataOutFeatures)
 
         expectedXYZ = patch_size
@@ -41,11 +41,11 @@ class MyTransformerST(nn.Module):
             else torch.tensor([0, 0, 0, 1]) if x == "d" \
             else torch.tensor([0, 0, 0, 0])
 
-        tLayer = TransformerLayerT(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=num_heads)
-        sLayer = TransformerLayerS(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=num_heads)
+        tLayer = TransformerLayerT(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=nHeads)
+        sLayer = TransformerLayerS(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=nHeads)
 
         self.transformerT   = Transformer(tLayer, num_layers=transformer_num_layers)
-        self.temporal_proj  = AttentionPooling(self.emb_dim + self.nPatientDataOutFeatures, num_heads)
+        self.temporal_proj  = AttentionPooling(self.emb_dim + self.nPatientDataOutFeatures, nHeads)
         self.transformerS   = Transformer(sLayer, num_layers=transformer_num_layers)
         self.fc_to_patches  = nn.Linear(self.emb_dim + self.nPatientDataOutFeatures, self.emb_dim)
 
@@ -69,7 +69,7 @@ class MyTransformerST(nn.Module):
     
     def forward(self, x: torch.Tensor, shape: tuple[int], patientIDs: list[str], patchIndices: list[int]):
         B, T, N, E, X, Y, Z = shape
-        patientDataEmb = torch.empty(B, N*X*Y*Z, T, self.patientDataEmbed.out_features, device=x.device)      # [B, N, npatientDataOutFeatures]
+        patientDataEmb = torch.empty(B, N*X*Y*Z, T, self.patientDataEmbed.out_features, device=x.device)      # [B, N, T, npatientDataOutFeatures]
         acqTimes = torch.zeros(B, N*X*Y*Z, T)
 
         patientData = CleanPatientData(self.patient_data_df, patientIDs)
@@ -122,7 +122,7 @@ class MyTransformerST(nn.Module):
 
         # reshape to match conv shape
         x = x[:, 1:].reshape(B, N, X, Y, Z, E)
-        x = x.permute(0, 1, 5, 2, 3, 4)
+        x = x.permute(0, 1, 5, 2, 3, 4)         # (B, N, E, X, Y, Z)
         # features = unpatchTensor(x, self.num_patches)       # [B, E, P, P, P]
 
         return x, cls_token
