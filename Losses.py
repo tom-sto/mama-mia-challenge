@@ -134,3 +134,17 @@ class SegLoss(nn.Module):
         # print(f"LOSS:\tBD loss: {bdLoss}")
 
         return diceAndBCE + bdLoss
+
+# Assume input and target are same size (X, Y, Z) and the values of each entry are binary.
+# Return Dice loss and Dice score
+def Dice(recon: torch.Tensor, target: torch.Tensor):
+    r: torch.Tensor = recon.to(dtype=bool)
+    t: torch.Tensor = target.to(dtype=bool)
+
+    smooth = 1e-4
+
+    tp_2  = int(torch.sum(r & t).item()) << 1   # true positives
+    mag_r = int(torch.sum(r).item())            # magnitude of recon
+    mag_t = int(torch.sum(t).item())            # magnitude of target
+    diceScore = (tp_2 + smooth) / (mag_r + mag_t + smooth)
+    return diceScore

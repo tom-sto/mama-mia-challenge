@@ -58,7 +58,7 @@ class MyUNet(torch.nn.Module):
         # print("Features:", features.shape)
         # print("cls token:", cls_token.shape)
         if self.ret == "seg":
-            return None, segOut, None
+            return segOut, None, None
         elif self.ret == "segOnly":
             return segOut
 

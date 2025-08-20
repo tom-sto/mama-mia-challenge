@@ -7,7 +7,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchjd.aggregation import UPGrad
 from torchjd import mtl_backward
 from MyUNet import MyUNet
-from Losses import PCRLoss, SegLoss
+from Losses import PCRLoss, SegLoss, Dice
 from Schedulers import WarmupCosineAnnealingWithRestarts
 from CustomLoader import GetDataloaders
 from DataProcessing import reconstructImageFromPatches
@@ -50,17 +50,14 @@ class MyTrainer():
         
         self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, device, test=test)
 
-        # non_transformer_params = [
-        #     param for name, param in self.model.encoder.named_parameters()
-        #     if not name.startswith("transformer")
-        # ]
-        # # change optimizer and scheduler
-        # self.optimizer = torch.optim.AdamW([
-        #     {'params': non_transformer_params, 'lr': self.peakLR * 20, 'weight_decay': 1e-4},
-        #     {'params': self.model.encoder.transformer.parameters(), 'lr': self.peakLR, 'weight_decay': 1e-3},
-        #     {'params': self.model.decoder.parameters(), 'lr': self.peakLR,  'weight_decay': 1e-4}
-        # ])
-        self.optimizer = torch.optim.AdamW(params=self.model.parameters(), lr=self.minLR, weight_decay=1e-4)
+        # change optimizer and scheduler
+        self.optimizer = torch.optim.AdamW([
+            {'params': self.model.encoder.parameters(), 'lr': self.minLR * 20, 'weight_decay': 1e-4},
+            {'params': self.model.bottleneck.parameters(), 'lr': self.minLR, 'weight_decay': 1e-4},
+            {'params': self.model.decoder.parameters(), 'lr': self.minLR * 10,  'weight_decay': 1e-4},
+            {'params': self.model.classifier.parameters(), 'lr': self.minLR * 50,  'weight_decay': 1e-4}
+        ])
+        # self.optimizer = torch.optim.AdamW(params=self.model.parameters(), lr=self.minLR, weight_decay=1e-4)
         # use much smaller initial scale since our early losses will be close to 1
         self.gradScaler = torch.GradScaler(device.type, init_scale=2**8)
         self.aggregator = UPGrad()
@@ -183,6 +180,7 @@ class MyTrainer():
 
             segLossesVal = []
             pcrLossesVal = []
+            diceVal = []
             for idx, struct in enumerate(self.vlDataloader):        # iterate over patient cases
                 obj, patientIDs = struct
 
@@ -218,6 +216,13 @@ class MyTrainer():
                             pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcrVal)
                             del pcrOut, clsToken
 
+                    segOut: torch.Tensor = (segOut > 0).int()
+                    segImageArr = reconstructImageFromPatches(segOut.transpose(1, 0), [patchIdxs], PATCH_SIZE)
+                    targetImageArr = reconstructImageFromPatches(target.transpose(1, 0), [patchIdxs], PATCH_SIZE)
+                    
+                    dice = Dice(segImageArr, targetImageArr)
+                    diceVal.append(dice)
+
                     segLossesVal.append(segLoss.item())
                     if self.joint and pcrLoss:
                         pcrLossesVal.append(pcrLoss.item())
@@ -241,6 +246,9 @@ class MyTrainer():
             # MODEL CHECKPOINTING
             avgSegValLoss = Mean(segLossesVal)
             self.writer.add_scalar('Seg Loss/Validation', avgSegValLoss, self.currentEpoch)
+
+            avgDiceVal = Mean(diceVal)
+            self.writer.add_scalar('Validation Dice', avgDiceVal, self.currentEpoch)
 
             if avgSegValLoss < bestSeg:
                 bestSeg = avgSegValLoss
@@ -281,28 +289,90 @@ class MyTrainer():
         reconInp = reconstructImageFromPatches(phaseData[:,0].cpu(), [patchIdxs], PATCH_SIZE)
         sitk.WriteImage(sitk.GetImageFromArray(reconInp.numpy()), "reconInp.nii")
 
-    def inference(self, state_dict_path: str, outputPath: str = "./outputs", outputPathPCR: str = "./outputsPCR"):
-        state_dict = torch.load(state_dict_path, map_location=self.model.device, weights_only=False)['network_weights']
-        self.model.load_state_dict(state_dict)
+    def inference(self, stateDictPath: str, outputPath: str = "./outputs", outputPathPCR: str = "./outputsPCR"):
+        stateDictPath = os.path.join(self.outputFolder, stateDictPath)
+        stateDict = torch.load(stateDictPath, map_location=self.model.device, weights_only=False)
+        modelState = stateDict['networkWeights']
+        epoch = stateDict["epoch"]
+        print(f"Loading {os.path.basename(stateDictPath)} from epoch {epoch}")
+        self.model.load_state_dict(modelState)
         self.model.eval()
-        self.model.ret = "seg"
+        self.model.ret = "segOnly"
 
+        outputPath = os.path.join(self.outputFolder, outputPath)
+        outputPathPCR = os.path.join(self.outputFolder, outputPathPCR)
         os.makedirs(outputPath, exist_ok=True)
+        os.makedirs(outputPathPCR, exist_ok=True)
+
+        import pandas as pd
+        from MAMAMIA.src.challenge.metrics import hausdorff_distance
         
+        print("Running inference!")
         # TODO: Finish me
+        scoreDF = pd.DataFrame(columns=["Patient ID", "Dice", "HD95", "PCR", "PCR Pred"])
         for struct in self.tsDataloader:
             obj, patientIDs = struct
+            seg: dict = obj['seg']
+            phase: dict = obj['phase']
 
+            # print(seg)
+
+            if type(patientIDs) == str:
+                patientID = patientIDs
+                patientIDs = [patientIDs]
+            else:
+                patientID = patientIDs[0]       # This is weird: TODO Fix ME
+            
+
+            target, patchIdxs = seg[0]()
+            # pcrVal = pcr[i]()
+
+            target: torch.Tensor = target.unsqueeze(0)          # add a singleton batch dimension
+
+            # run the phase handles
+            phaseData = [phase[p][0]() for p in phase.keys()]
+            phaseData = torch.stack(phaseData).unsqueeze(0)     # add a singleton batch dimension
+
+            segOut: torch.Tensor = self.model(phaseData, patientIDs, patchIdxs)
+            # convert logits to binary prediction
+            # this is equivalent to sigmoid(segOut) > 0.5
+            segOut = (segOut > 0).int()
+
+            segImageArr = reconstructImageFromPatches(segOut.transpose(1, 0), [patchIdxs], PATCH_SIZE)
+            targetImageArr = reconstructImageFromPatches(target, [patchIdxs], PATCH_SIZE)
+            
+            dice = Dice(segImageArr, targetImageArr)
+
+            segImageArr = segImageArr.detach().cpu().numpy()
+            targetImageArr = targetImageArr.detach().cpu().numpy()
+
+            hausdorff = hausdorff_distance(targetImageArr, segImageArr)
+            
+            row = pd.DataFrame({"Patient ID": [patientID], "Dice": [dice], "HD95": [hausdorff]})
+            scoreDF = pd.concat([scoreDF, row])
+
+            sitk.WriteImage(sitk.GetImageFromArray(segImageArr), 
+                            os.path.join(outputPath, f"{patientID}_pred.nii"))
+            sitk.WriteImage(sitk.GetImageFromArray(targetImageArr), 
+                            os.path.join(outputPath, f"{patientID}.nii"))
+            
+            print(f"Finished patient {patientID}: Dice {dice:.4f}\tHausdorff 95 {hausdorff:.4f}", end="\r")
+        print()
+        scoreDF.to_csv(os.path.join(self.outputFolder, "scores.csv"))
+
+        print(f"Average Dice: {scoreDF["Dice"].mean()}")
+        print(f"Average HD95: {scoreDF["HD95"].mean()}")
         # from score_task1 import doScoring
         # doScoring(os.path.dirname(outputPath))
-        import pdb, pandas as pd, SimpleITK as sitk
+        
+        
+        # import pdb, pandas as pd, SimpleITK as sitk
         # pdb.set_trace()
         
-
-        from predictPCR import scorePCR
-        scorePCR(predPath)
-        from MAMAMIA.src.challenge.scoring_task2 import doScoring
-        doScoring(os.path.dirname(predPath))
+        # from predictPCR import scorePCR
+        # scorePCR(predPath)
+        # from MAMAMIA.src.challenge.scoring_task2 import doScoring
+        # doScoring(os.path.dirname(predPath))
     
     def plotLosses(self):
         fig, ax1 = plt.subplots(figsize=(10, 5))
@@ -348,11 +418,11 @@ if __name__ == "__main__":
     pretrainedDecoderPath = None
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    modelName = "TS_test_run_with_skips"
+    modelName = "TS_test_run_with_skips_full"
     trainer = MyTrainer(100, modelName, "Testing", joint=False)
     
     trainer.setup(dataDir, device, pretrainedDecoderPath, useSkips=True, test=False)
     trainer.train()
-    # trainer.inference(state_dict_path,
-    #                   outputPath=rf"{outputFolder}/outputs/pred_segmentations_cropped",
-    #                   outputPathPCR=rf"{outputFolder}/outputs/pred_PCR_cropped")
+    trainer.inference("BestSeg.pth",
+                      outputPath=rf"outputs/predSegmentationsCropped",
+                      outputPathPCR=rf"outputs")

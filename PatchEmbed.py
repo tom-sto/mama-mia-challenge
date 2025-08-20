@@ -1,6 +1,14 @@
 import torch
 import torch.nn as nn
-from DataProcessing import unpatchTensor, subpatchTensor
+
+def init_weights_conv(module):
+    if isinstance(module, nn.Conv3d):
+        nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+        if module.bias is not None:
+            nn.init.constant_(module.bias, 0)
+    elif isinstance(module, nn.BatchNorm3d):
+        nn.init.constant_(module.weight, 1)
+        nn.init.constant_(module.bias, 0)
 
 class PatchEncoder(nn.Module):
     def __init__(self, channels: list[int], strides: list[int], dropout: float = 0.2, useSkips: bool = False):
@@ -56,15 +64,7 @@ class PatchEncoder(nn.Module):
             return x, None, (B, T, N, E, X, Y, Z)
 
     def init_weights(self):
-        def init_weights_patch_embed(module):
-            if isinstance(module, nn.Conv3d):
-                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-            elif isinstance(module, nn.BatchNorm3d):
-                nn.init.constant_(module.weight, 1)
-                nn.init.constant_(module.bias, 0)
-        self.apply(init_weights_patch_embed)
+        self.apply(init_weights_conv)
 
 class PatchDecoder(nn.Module):
     def __init__(self, channels: list[int], useSkips: bool = False):
@@ -93,6 +93,8 @@ class PatchDecoder(nn.Module):
                 )
 
             self.decoder.append(decBlock)
+        
+        self.init_weights()
 
     def forward(self, x: torch.Tensor, skips: list[torch.Tensor] = None):
         # Decoder with skip connections
@@ -107,3 +109,6 @@ class PatchDecoder(nn.Module):
                 x = block(x)
 
         return x    # output raw logits
+    
+    def init_weights(self):
+        self.apply(init_weights_conv)

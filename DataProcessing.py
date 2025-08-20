@@ -179,15 +179,15 @@ def getChunkIndices(pX, pY, pZ, chunkSize):
     
     return indices                              # if you want actual coordinates, just multiply each index by patch size!
 
-def reconstructImageFromPatches(patches: list[torch.Tensor], patchCoords: list[list[torch.Tensor]], patchSize: int, device: torch.device=None):
+def reconstructImageFromPatches(patches: list[torch.Tensor], patchCoords: list[list[torch.Tensor]], patchSize: int):
     # Determine the target dimensions from the maximum coordinates in patchCoords
     max_coords = torch.max(torch.cat(patchCoords), dim=0).values
     target_dims = (max_coords + 1) * patchSize
     target_dims = target_dims.tolist()
 
     # Initialize the reconstructed image and a weight map for averaging overlaps
-    reconstructed_image: torch.Tensor = torch.zeros(target_dims, device=device, dtype=float)
-    weight_map: torch.Tensor = torch.zeros(target_dims, device=device, dtype=float)
+    reconstructed_image: torch.Tensor = torch.zeros(target_dims, device=patches[0].device, dtype=float)
+    weight_map: torch.Tensor = torch.zeros(target_dims, device=patches[0].device, dtype=float)
 
     for chunk, coords in zip(patches, patchCoords):
         for patch, coord in zip(chunk, coords):

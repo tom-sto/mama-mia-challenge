@@ -21,7 +21,7 @@ class CustomDataset(Dataset):
         images = {}
         for imageType in IMAGE_TYPES:
             if not imageType in self.data[patientID].keys():
-                print(f"{imageType} not found in {self.data[patientID].keys()}")
+                # print(f"{imageType} not found in {self.data[patientID].keys()}")
                 continue
 
             images[imageType] = {}
