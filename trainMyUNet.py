@@ -38,15 +38,18 @@ class MyTrainer():
               device: torch.device,
               pretrainedDecoderPath: str = None,
               useSkips: bool = True,
+              bottleneck: str = "MyTransformer",
               test: bool = False):
 
         nHeads = 8
-        self.patchSize = 32
+        patchSize = 32
 
-        self.model = MyUNet(self.patchSize, 
-                            pretrainedDecoderPath=pretrainedDecoderPath, 
-                            nHeads=nHeads, 
-                            useSkips=useSkips).to(device)
+        self.model = MyUNet(patchSize,
+                            pretrainedDecoderPath=pretrainedDecoderPath,
+                            nHeads=nHeads,
+                            useSkips=useSkips,
+                            joint=self.joint,
+                            bottleneck=bottleneck).to(device)
         
         self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, device, test=test)
 
@@ -129,15 +132,13 @@ class MyTrainer():
                     phaseData = torch.stack(phaseData).unsqueeze(0)
 
                     with torch.autocast(self.model.device.type):
-                        segOut, sharedFeatures, clsToken = self.model(phaseData, patientIDs, patchIdxs)
+                        segOut, sharedFeatures, pcrOut = self.model(phaseData, patientIDs, patchIdxs)
 
                         segLoss: torch.Tensor = self.SegLoss(segOut, target, distMap)
                         pcrLoss = None
-                        if self.currentEpoch > self.pretrainSegmentation and clsToken and self.joint:
-                            pcrOut: torch.Tensor = self.model.classifier(clsToken)
-                            # print(f"cls out shape: {clsOut.shape}")
+                        if self.currentEpoch > self.pretrainSegmentation and pcrOut and self.joint:
                             pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcrVal)
-                            del pcrOut, clsToken
+                            del pcrOut
                 
                     segLossesThisEpoch.append(segLoss.item())
                     self.optimizer.zero_grad()
@@ -207,14 +208,13 @@ class MyTrainer():
                     phaseData = torch.stack(phaseData).unsqueeze(0)
 
                     with torch.autocast(self.model.device.type):
-                        segOut, _, clsToken = self.model(phaseData, patientIDs, patchIdxs)
+                        segOut, _, pcrOut = self.model(phaseData, patientIDs, patchIdxs)
 
                         segLoss: torch.Tensor = self.SegLoss(segOut, target, distMap)
                         pcrLoss = None
-                        if self.currentEpoch > self.pretrainSegmentation and clsToken  and self.joint:
-                            pcrOut: torch.Tensor = self.model.classifier(clsToken)
+                        if self.currentEpoch > self.pretrainSegmentation and pcrOut and self.joint:
                             pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcrVal)
-                            del pcrOut, clsToken
+                            del pcrOut
 
                     segOut: torch.Tensor = (segOut > 0).int()
                     segImageArr = reconstructImageFromPatches(segOut.transpose(1, 0), [patchIdxs], PATCH_SIZE)
@@ -416,12 +416,17 @@ if __name__ == "__main__":
     dataDir = rf"E:\MAMA-MIA\my_preprocessed_data\{datasetName}"
     # pretrainedDecoderPath = "pretrained_weights/nnunet_pretrained_weights_64_best.pth"
     pretrainedDecoderPath = None
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    modelName = "TS_test_run_with_skips_full"
+    modelName = "conv_bottleneck_with_skips_full"
     trainer = MyTrainer(100, modelName, "Testing", joint=False)
     
-    trainer.setup(dataDir, device, pretrainedDecoderPath, useSkips=True, test=False)
+    trainer.setup(dataDir, 
+                  device, 
+                  pretrainedDecoderPath=pretrainedDecoderPath, 
+                  useSkips=True, 
+                  bottleneck="Conv", 
+                  test=False)
     trainer.train()
     trainer.inference("BestSeg.pth",
                       outputPath=rf"outputs/predSegmentationsCropped",

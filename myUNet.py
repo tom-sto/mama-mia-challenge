@@ -13,6 +13,7 @@ class MyUNet(torch.nn.Module):
                  pretrainedDecoderPath: str = None,
                  nHeads: int = 8,
                  useSkips: bool = True,
+                 joint: bool = True,
                  bottleneck: str = "TransformerST",
                  nBottleneckLayers: int = 4):
         super().__init__()
@@ -29,12 +30,14 @@ class MyUNet(torch.nn.Module):
             decoderStateDict = {k.replace("decoder.", ""): v for k, v in stateDict.items() if "decoder" in k}
             self.decoder.load_state_dict(decoderStateDict, strict=False)
 
+        self.bottleneckType = bottleneck
         match bottleneck:
             case "TransformerST":
                 self.bottleneck = MyTransformerST(expectedPatchSize, 
                                                   expectedChannels, 
                                                   nHeads=nHeads, 
                                                   transformer_num_layers=4)
+            # TODO: Implement PCR with these bottlenecks
             case "Conv":
                 self.bottleneck = ConvBottleneck(expectedChannels[-1], 
                                                  expectedChannels[-1], 
@@ -42,9 +45,9 @@ class MyUNet(torch.nn.Module):
                                                  nHeads)
             case "None" | _:
                 self.bottleneck = NoBottleneck(expectedChannels[-1], nHeads)
-        self.classifier = ClassifierHead(dim=expectedChannels[-1])
 
-        self.ret = "all"
+        self.classifier = ClassifierHead(dim=expectedChannels[-1])
+        self.ret = "all" if joint else "seg"
 
     def forward(self, x: torch.Tensor, patientIDs: list[str], patchIdxs: list[tuple[int]], patientData: list = None):
         x, skips, shape = self.encoder(x)
@@ -52,11 +55,10 @@ class MyUNet(torch.nn.Module):
         # print(f"skips: {[skips[i].shape for i in range(len(skips))]}")
 
         x = self.bottleneck(x, shape, patientIDs, patchIdxs)
-        if "seg" not in self.ret:
+        if "seg" not in self.ret or "Transformer" in self.bottleneckType:
             sharedFeatures, clsToken = x    # unpack cls if our bottleneck allows
             x: torch.Tensor = sharedFeatures
-        else:
-            x, _ = x
+        
         # print(f"shape after bottleneck: {x.shape}")
         # print(f"cls token shape: {clsToken.shape}")
 
