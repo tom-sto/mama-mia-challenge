@@ -4,12 +4,13 @@ from Bottleneck import *
 from PCRClassifier import ClassifierHead
 from PatchEmbed import PatchEncoder, PatchDecoder
 from AttentionPooling import AttentionPooling
+import helpers
 
 class MyUNet(torch.nn.Module):
     def __init__(self, 
                  expectedPatchSize: int,
-                 expectedChannels: list[int] = [1, 4, 16, 48, 128, 256], 
-                 expectedStride: list[int] = [2, 2, 2, 2, 2, 2],
+                 expectedChannels: list[int] = [1, 32, 64, 128, 256, 320], 
+                 expectedStride: list[int] = [2, 2, 2, 2, 2],
                  pretrainedDecoderPath: str = None,
                  nHeads: int = 8,
                  useSkips: bool = True,
@@ -32,18 +33,13 @@ class MyUNet(torch.nn.Module):
 
         self.bottleneckType = bottleneck
         match bottleneck:
-            case "TransformerST":
-                self.bottleneck = MyTransformerST(expectedPatchSize, 
-                                                  expectedChannels, 
-                                                  nHeads=nHeads, 
-                                                  transformer_num_layers=4)
+            case helpers.BOTTLENECK_TRANSFORMERST:
+                self.bottleneck = MyTransformerST(expectedPatchSize, expectedChannels, nHeads, nBottleneckLayers)
+            
             # TODO: Implement PCR with these bottlenecks
-            case "Conv":
-                self.bottleneck = ConvBottleneck(expectedChannels[-1], 
-                                                 expectedChannels[-1], 
-                                                 nBottleneckLayers, 
-                                                 nHeads)
-            case "None" | _:
+            case helpers.BOTTLENECK_CONV:
+                self.bottleneck = ConvBottleneck(expectedChannels[-1], expectedChannels[-1], nHeads, nBottleneckLayers)
+            case helpers.BOTTLENECK_NONE | _:
                 self.bottleneck = NoBottleneck(expectedChannels[-1], nHeads)
 
         self.classifier = ClassifierHead(dim=expectedChannels[-1])
@@ -58,21 +54,9 @@ class MyUNet(torch.nn.Module):
         if "seg" not in self.ret or "Transformer" in self.bottleneckType:
             sharedFeatures, clsToken = x    # unpack cls if our bottleneck allows
             x: torch.Tensor = sharedFeatures
-        
-        # print(f"shape after bottleneck: {x.shape}")
-        # print(f"cls token shape: {clsToken.shape}")
 
-        # print(f"Bottleneck output has nan: {torch.any(x.isnan())}")
-        # print(f"\t{x.min(), x.max()}")
-        # put batch and patches together for decoder
         segOut: torch.Tensor = self.decoder(x.reshape(-1, *x.shape[2:]), skips)
-        # print(f"seg out shape: {segOut.shape}")
-        # print(f"Decoder output has nan: {torch.any(segOut.isnan())}")
-        # print(f"\t{segOut.min(), segOut.max()}")
-        # print(f"target shape: {target.shape}")
 
-        # print("Features:", features.shape)
-        # print("cls token:", cls_token.shape)
         if self.ret == "seg":
             return segOut, None, None
         elif self.ret == "segOnly":

@@ -1,6 +1,6 @@
 import torch, torch.nn as nn
 
-from MAMAMIA.nnUNet.nnunetv2.training.loss.compound_losses import DC_and_BCE_loss
+from MAMAMIA.nnUNet.nnunetv2.training.loss.dice import MemoryEfficientSoftDiceLoss
 
 class PCRLoss(nn.Module):
     def __init__(self):
@@ -51,14 +51,11 @@ class BoundaryLoss(nn.Module):
         reduction (str): Specifies the reduction to apply to the output:
                          'mean' | 'sum' | 'none'. Default: 'mean'.
                          'mean' will average the loss over the batch.
-        class_idx (int, optional): The index of the foreground class in the target tensor.
-                                   Only relevant if targets are one-hot encoded and
-                                   have more than one channel. Defaults to 1 (assuming
-                                   channel 0 is background, channel 1 is foreground).
+        class_idx (int, optional): The start index of the foreground class in the target tensor.
+                                   Defaults to 1 (assuming channel 0 is bg, channel 1 is fg).
     """
-    def __init__(self, apply_sigmoid: bool = True, reduction: str = 'mean', class_idx: int = 1):
+    def __init__(self, reduction: str = 'mean', class_idx: int = 1):
         super(BoundaryLoss, self).__init__()
-        self.apply_sigmoid = apply_sigmoid
         self.reduction = reduction
         self.class_idx = class_idx
 
@@ -70,7 +67,7 @@ class BoundaryLoss(nn.Module):
         Calculates the Boundary Loss.
 
         Args:
-            inputs (torch.Tensor): Raw outputs from the model.
+            inputs (torch.Tensor): Activated outputs from the model.
                                    Shape: (N, C, H, W, D) for 3D or (N, C, H, W) for 2D.
                                    Expect C = 2 for binary background vs foreground
             dist_maps (torch.Tensor): Distance maps for ground truth segmentations.
@@ -79,14 +76,7 @@ class BoundaryLoss(nn.Module):
         Returns:
             torch.Tensor: The calculated Boundary Loss.
         """
-        # print(f"Inputs have nan before sigmoid: {torch.any(inputs.isnan())}")
-        # print(f"Inputs before sigmoid: {inputs.min(), inputs.max()}")
-        if self.apply_sigmoid:
-            # Apply sigmoid if inputs are raw values
-            # inputs = torch.sigmoid(inputs.float()).to(dtype=inputs.dtype)
-            inputs = torch.sigmoid(inputs)
-
-        inputs = inputs[:, self.class_idx:self.class_idx+1, ...]    # select foreground only
+        inputs = inputs[:, self.class_idx:, ...]    # select foreground only
         # print(f"Inputs have nan after sigmoid: {torch.any(inputs.isnan())}")
         # print(f"Inputs after sigmoid: {inputs.min(), inputs.max()}")
 
@@ -109,31 +99,30 @@ class BoundaryLoss(nn.Module):
             return loss
     
 class SegLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, bcePosWeight: float):
         super().__init__()
 
         softDiceKWArgs = {'batch_dice': False,      # we will likely use a batch size of 1
-                          'do_bg': True,           # our segmentation will just be one channel
+                          'do_bg': True,            # our segmentation will just be one channel
                           'smooth': 1e-5, 
                           'ddp': False}
         self.DiceWeight = 1
         self.BCEWeight  = 1
         self.BDWeight   = 1
 
-        self.DiceAndBCELoss = DC_and_BCE_loss({}, softDiceKWArgs)
-        self.BDLoss = BoundaryLoss(class_idx=0)         # we only expect one input channel since this is binary prediction
+        self.DiceLoss   = MemoryEfficientSoftDiceLoss(**softDiceKWArgs)
+        self.BCELoss    = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(bcePosWeight))
+        self.BDLoss     = BoundaryLoss()
 
     def forward(self, x: torch.Tensor, target: torch.Tensor, dmaps: torch.Tensor):
-        # make sure these weights are up-to-date since we may change them over time
-        self.DiceAndBCELoss.weight_ce   = self.BCEWeight
-        self.DiceAndBCELoss.weight_dice = self.DiceWeight
+        bceLoss  = self.BCELoss(x, target.float())
+        
+        # now we activate with softmax since these losses assume prob input
+        x = torch.softmax(x, dim=-4)
 
-        diceAndBCE  = self.DiceAndBCELoss(x, target)
-        # print(f"LOSS:\tDC and BCE loss: {diceAndBCE}")
-        bdLoss      = self.BDLoss(x, dmaps) * self.BDWeight
-        # print(f"LOSS:\tBD loss: {bdLoss}")
-
-        return diceAndBCE + bdLoss
+        diceLoss = self.DiceLoss(x, target)
+        bdLoss   = self.BDLoss(x, dmaps)
+        return bceLoss * self.BCEWeight, diceLoss * self.DiceWeight, bdLoss * self.BDWeight
 
 # Assume input and target are same size (X, Y, Z) and the values of each entry are binary.
 # Return Dice loss and Dice score

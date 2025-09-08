@@ -3,7 +3,16 @@ import pandas as pd
 
 IMAGE_TYPES = ("phase", "seg", "dmap")
 PATCH_SIZE  = 32
-CHUNK_SIZE  = (9, 12, 9)
+CHUNK_SIZE  = 64
+NUM_PATCHES = 64
+
+DTYPE_SEG   = torch.bool
+DTYPE_DMAP  = torch.float16
+DTYPE_PHASE = torch.float16
+
+BOTTLENECK_TRANSFORMERST = "TransformerST"
+BOTTLENECK_CONV = "Conv"
+BOTTLENECK_NONE = "None"
 
 def Mean(l: list):
     if len(l) == 0:
@@ -27,11 +36,14 @@ def FormatSeconds(s):
     return f"{days:.0f} day{"s" if days > 1 else ""}, {hours:.0f} hour{"s" if hours > 1 else ""}, {minutes:.0f} minute{"s" if minutes > 1 else ""}, and {seconds:.4f} seconds"
 
 # adapted from PE formula in Viswani et. al. (2023)
-def PositionEncoding(seq: torch.Tensor, dim: int):
+def PositionEncoding(seq: torch.Tensor, dim: int, div=10_000, scale=None):
+    if scale is not None:
+        max_vals = seq.max(dim=-1, keepdim=True).values
+        seq = seq*scale / max_vals.clamp(min=1e-8)
     position = seq.unsqueeze(-1)                                # [..., N, 1]
 
     i = torch.arange(0, dim, 2, device=position.device)                  # [E/2]
-    div_term = 1.0 / (10000 ** (i / dim))
+    div_term = 1.0 / (div ** (i / dim))
 
     pos = position * div_term                                   # [..., N, E/2]
     pos_enc = torch.empty(*seq.shape, dim, device=position.device)       # [..., N, E]
@@ -45,15 +57,16 @@ def PositionEncoding3D(seq: torch.Tensor, dim: int):
     # give the z-axis the short end of the stick if need be, then y-axis
 
     x, y, z = seq[..., 0], seq[..., 1], seq[..., 2]
-    d = dim // 3
-    dX, dY, dZ = d, d, d
-    if dim % d == 1:
-        dX += 1
-    elif dim % d == 2:
-        dX += 1
-        dY += 1
+    d = (dim // 2) // 3
+    dX, dY, dZ = 2*d, 2*d, 2*d
+    if dim % (d * 6) == 4:
+        dX += 2
+        dY += 2
+    elif dim % (d * 6) == 2:
+        dX += 2
 
     assert dX + dY + dZ == dim, f"You did the math wrong dummy! {dX} + {dY} + {dZ} != {dim}"
+    assert not any([dX % 2, dY % 2, dZ % 2]), f"Need these dims to be even!, Got ({dX}, {dY}, {dZ})"
     
     xEnc = PositionEncoding(x, dim=dX)
     yEnc = PositionEncoding(y, dim=dY)

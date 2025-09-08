@@ -9,9 +9,9 @@ class MyTransformerST(nn.Module):
     def __init__(self,
                  patch_size,
                  channels,
-                 nHeads=4,
-                 transformer_num_layers=6,
-                 patient_data_path=r"E:\MAMA-MIA\clinical_and_imaging_info.xlsx"):
+                 nHeads,
+                 nLayers,
+                 patient_data_path=r"F:\MAMA-MIA\clinical_and_imaging_info.xlsx"):
         super().__init__()
 
         self.patch_size = patch_size
@@ -44,9 +44,9 @@ class MyTransformerST(nn.Module):
         tLayer = TransformerLayerT(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=nHeads)
         sLayer = TransformerLayerS(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=nHeads)
 
-        self.transformerT   = Transformer(tLayer, num_layers=transformer_num_layers)
+        self.transformerT   = Transformer(tLayer, num_layers=nLayers)
         self.temporal_proj  = AttentionPooling(self.emb_dim + self.nPatientDataOutFeatures, nHeads)
-        self.transformerS   = Transformer(sLayer, num_layers=transformer_num_layers)
+        self.transformerS   = Transformer(sLayer, num_layers=nLayers)
         self.fc_to_patches  = nn.Linear(self.emb_dim + self.nPatientDataOutFeatures, self.emb_dim)
 
         self._initialize_weights()
@@ -101,7 +101,7 @@ class MyTransformerST(nn.Module):
 
         # temporal encoding of acquisition times
         # print(f"acqTimes shape: {acqTimes.shape}")
-        temporalPosEnc = PositionEncoding(acqTimes, E + self.nPatientDataOutFeatures).to(x.device)
+        temporalPosEnc = PositionEncoding(acqTimes, E + self.nPatientDataOutFeatures, div=100, scale=torch.pi*2).to(x.device)
         # print(f"Temporal pos encoding: {temporalPosEnc.shape}")
         x[:, 1:] = x[:, 1:] + temporalPosEnc
 

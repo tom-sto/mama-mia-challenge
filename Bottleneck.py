@@ -23,7 +23,7 @@ class NoBottleneck(nn.Module):
         return x
     
 class ConvBottleneck(nn.Module):
-    def __init__(self, channelsIn: int, channelsOut: int, nLayers: int, nHeads: int):
+    def __init__(self, channelsIn: int, channelsOut: int, nHeads: int, nLayers: int):
         super().__init__()
         bottleneckChannels = torch.linspace(channelsIn, 
                                             channelsOut, 

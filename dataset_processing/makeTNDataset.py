@@ -3,17 +3,23 @@ import numpy as np
 import pandas as pd
 import zarr, json
 import os, glob
+from shutil import rmtree 
 from scipy.ndimage import distance_transform_edt as edt
 from os.path import join
 from time import time
 from concurrent.futures import ProcessPoolExecutor
 
-RAW_DIR = r"E:\MAMA-MIA\nnUNet_raw\Dataset106_cropped_Xch_breast_no_norm"
-PP_DIR  = r"E:\MAMA-MIA\my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm"
+RAW_DIR = r"F:\MAMA-MIA\nnUNet_raw\Dataset106_cropped_Xch_breast_no_norm"
+PP_DIR  = r"F:\MAMA-MIA\my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm"
 TR_DIR = join(RAW_DIR, "imagesTr")
 TS_DIR = join(RAW_DIR, "imagesTs")
-LB_DIR = r"E:\MAMA-MIA\segmentations\expert"
-PATIENT_INFO = r"E:\MAMA-MIA\patient_info_files"
+LB_DIR = r"F:\MAMA-MIA\segmentations\expert"
+PATIENT_INFO = r"F:\MAMA-MIA\patient_info_files"
+
+def save_zarr(path, arr):
+    if os.path.exists(path):
+        rmtree(path)
+    zarr.save(path, arr)
 
 def crop_to_bounding_box(image: sitk.Image, patientID: str):
     patientInfoPath = os.path.join(PATIENT_INFO, f"{patientID.lower()}.json")
@@ -37,27 +43,18 @@ def crop_to_bounding_box(image: sitk.Image, patientID: str):
     
     return cropped_image
 
-def pad_to_patch_compatible_size(img: sitk.Image, patch_size: int = 32) -> sitk.Image:
-    size = np.array(img.GetSize())
-    spacing = img.GetSpacing()
-    origin = img.GetOrigin()
-    direction = img.GetDirection()
+# don't fuck with the coordinate order when you don't have to
+def get_foreground_bbox(arr: np.ndarray):
+    coords = np.argwhere(arr)
+    
+    if coords.size == 0:
+        return None  # No foreground present
 
-    # Calculate padding for each dimension
-    pad = (-(size % patch_size) + patch_size) % patch_size
-    pad_before = pad // 2
-    pad_after = pad - pad_before
-
-    # Create new size with padding
-    new_origin = tuple(origin[i] - pad_before[i] * spacing[i] for i in range(3))
-
-    # Create padded image
-    padded_img: sitk.Image = sitk.ConstantPad(img, pad_before.tolist(), pad_after.tolist(), constant=0)
-    padded_img.SetOrigin(new_origin)
-    padded_img.SetSpacing(spacing)
-    padded_img.SetDirection(direction)
-
-    return padded_img
+    # Compute min and max along each axis
+    min_corner: np.ndarray = coords.min(axis=0)
+    max_corner: np.ndarray = coords.max(axis=0)
+    
+    return min_corner.tolist(), max_corner.tolist()
 
 def reorient_and_resample(img: sitk.Image,
                           target_orientation="RAS",
@@ -98,10 +95,10 @@ def do_training_case(patient_id, TR_DIR, PP_DIR, LB_DIR):
         outPath = join(PP_DIR, "training", file_path.split("\\")[-1][:-7])
         img = sitk.Cast(sitk.ReadImage(file_path), sitk.sitkFloat32)
         resImg = reorient_and_resample(img)
-        paddedImg = pad_to_patch_compatible_size(resImg)
+        # paddedImg = pad_to_patch_compatible_size(resImg)
 
-        arr = sitk.GetArrayFromImage(paddedImg)
-        zarr.save(outPath + ".zarr", arr)
+        arr = sitk.GetArrayFromImage(resImg).astype(np.float16)
+        save_zarr(outPath + ".zarr", arr)
         # sitk.WriteImage(sitk.GetImageFromArray(arr), outPath + ".nii")
     print(f"\tFinished phases for {patient_id}")
 
@@ -109,22 +106,33 @@ def do_training_case(patient_id, TR_DIR, PP_DIR, LB_DIR):
     segImg = sitk.ReadImage(segImgPath)
     croppedSeg = crop_to_bounding_box(segImg, patient_id)
     resSeg = reorient_and_resample(croppedSeg, interpolator=sitk.sitkNearestNeighbor)
-    paddedSeg = pad_to_patch_compatible_size(resSeg)
+    # paddedSeg = pad_to_patch_compatible_size(resSeg)
 
-    seg = sitk.GetArrayFromImage(paddedSeg).astype(bool)
-    zarr.save(outPathSeg, seg)
+    seg = sitk.GetArrayFromImage(resSeg).astype(bool)
+    save_zarr(outPathSeg, seg)
+
+    minFG, maxFG = get_foreground_bbox(seg)
+    with open(join(PP_DIR, "training", patient_id + "_bbox.txt"), mode="w+") as f:
+        f.write(str(minFG) + ", " + str(maxFG))
     print(f"\tFinished seg for {patient_id}")
     
     # get dmap for training set
     dist: np.ndarray = edt(seg)         # positive in foreground, 0 background
     inv: np.ndarray = edt(~seg)         # positive in background, 0 foreground
     dmap: np.ndarray = inv - dist       # negative in foreground, positive in background
+    dmap = dmap.astype(np.float16)
 
-    max_val = np.max(np.abs(dmap))
+    max_val = np.max(dmap)
+    min_val = np.min(dmap)
+    normDmap = np.empty_like(dmap, dtype=np.float16)
     if max_val != 0:
-        dmap /= max_val
+        mask = dmap > 0
+        normDmap[mask] = dmap[mask] / max_val
+    if min_val != 0:
+        mask = dmap < 0
+        normDmap[mask] = dmap[mask] / (-min_val)
     
-    zarr.save(outPathDmap, dmap.astype(np.float16))
+    save_zarr(outPathDmap, normDmap.astype(np.float16))
     print(f"\tFinished dmap for {patient_id}")
 
     assert dmap.shape == seg.shape == arr.shape
@@ -137,20 +145,25 @@ def do_testing_case(patient_id, TS_DIR, PP_DIR, LB_DIR):
         outPath = join(PP_DIR, "testing", file_path.split("\\")[-1][:-7])
         img = sitk.Cast(sitk.ReadImage(file_path), sitk.sitkFloat32)
         resImg = reorient_and_resample(img)
-        paddedImg = pad_to_patch_compatible_size(resImg)
+        # paddedImg = pad_to_patch_compatible_size(resImg)
 
-        arr = sitk.GetArrayFromImage(paddedImg)
-        zarr.save(outPath + ".zarr", arr)
+        arr = sitk.GetArrayFromImage(resImg).astype(np.float16)
+        save_zarr(outPath + ".zarr", arr)
     print(f"\tFinished phases for {patient_id}")
 
     segImgPath = join(LB_DIR, patient_id + ".nii.gz")
     segImg = sitk.ReadImage(segImgPath)
     croppedSeg = crop_to_bounding_box(segImg, patient_id)
     resSeg = reorient_and_resample(croppedSeg, interpolator=sitk.sitkNearestNeighbor)
-    paddedSeg = pad_to_patch_compatible_size(resSeg)
+    # paddedSeg = pad_to_patch_compatible_size(resSeg)
 
-    seg = sitk.GetArrayFromImage(paddedSeg)
-    zarr.save(outPathSeg, seg)
+    seg = sitk.GetArrayFromImage(resSeg)
+    save_zarr(outPathSeg, seg)
+
+    minFG, maxFG = get_foreground_bbox(seg)
+    with open(join(PP_DIR, "testing", patient_id + "_bbox.txt"), mode="w+") as f:
+        f.write(str(minFG) + ", " + str(maxFG))
+
     print(f"\tFinished seg for {patient_id}")
 
 def training_wrapper(patient_id):
@@ -176,20 +189,20 @@ def FormatSeconds(s):
     return f"{days:.0f} day{"s" if days > 1 else ""}, {hours:.0f} hour{"s" if hours > 1 else ""}, {minutes:.0f} minute{"s" if minutes > 1 else ""}, and {seconds:.4f} seconds"
 
 def main():
-    df = pd.read_csv(r"E:\MAMA-MIA\train_test_splits.csv")
+    df = pd.read_csv(r"F:\MAMA-MIA\train_test_splits.csv")
     start = time()
-    print("cleaning existing files...")
-    if os.path.exists(join(PP_DIR, "training")):
-        os.system(f'rmdir /S /Q "{join(PP_DIR, "training")}"')
-    if os.path.exists(join(PP_DIR, "testing")):
-        os.system(f'rmdir /S /Q "{join(PP_DIR, "testing")}"')
-    print(f"took {FormatSeconds(time() - start)}.")
+    # print("cleaning existing files...")
+    # if os.path.exists(join(PP_DIR, "training")):
+    #     os.system(f'rmdir /S /Q "{join(PP_DIR, "training")}"')
+    # if os.path.exists(join(PP_DIR, "testing")):
+    #     os.system(f'rmdir /S /Q "{join(PP_DIR, "testing")}"')
+    # print(f"took {FormatSeconds(time() - start)}.")
     
     os.makedirs(join(PP_DIR, "training"), exist_ok=True)
     os.makedirs(join(PP_DIR, "testing"), exist_ok=True)
 
     start = time()
-    with ProcessPoolExecutor() as executor:
+    with ProcessPoolExecutor(max_workers=8) as executor:
         list(executor.map(training_wrapper, df['train_split'].dropna().apply(str.lower).tolist()))
         list(executor.map(testing_wrapper, df['test_split'].dropna().apply(str.lower).tolist()))
 

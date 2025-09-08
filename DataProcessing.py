@@ -1,25 +1,25 @@
 import os, glob
 import torch
-import zarr
+import zarr, math
 import numpy as np
 import SimpleITK as sitk
 from functools import partial
-from helpers import PATCH_SIZE, CHUNK_SIZE
+from itertools import product
+from helpers import PATCH_SIZE, NUM_PATCHES, DTYPE_SEG, DTYPE_DMAP, DTYPE_PHASE
 
 ''' 
 data {
     tr/val/ts: {                 ("training", "validation", "testing")
-        patient_id: {       e.g. ("duke_002", "ispy2_981664")
-            "seg":  [function handles] to get ground truth binary tumor segmentation + patch indices
-            "dmap": [function handles] to get signed distance map of tumor segmentation + patch indices
-            "phase" {
-                phase_num: [function handles] to get DCE-MRI for this phase and patient + patch indices
-            }
-        }
+        patient_id:         e.g. ("duke_002", "ispy2_981664")
+            handle - partial that returns
+                - [segImg tensor]       (should be 1)
+                - [dmapImg tensor]      (should be 1)
+                - [phaseImg tensor]     (should be 2-5)
+                - [patchIndices]
     }
 }
 '''
-def GetData(parentDir: str, device: torch.device, test: bool = False):
+def GetData(parentDir: str, device: torch.device, oversample: float = 0., test: bool = False):
     print("Collecting data...")
     # assume this dir is E:\MAMA-MIA\my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm
     data = {}
@@ -29,30 +29,32 @@ def GetData(parentDir: str, device: torch.device, test: bool = False):
     pids = {}
     for trts in os.listdir(parentDir):
         trtsDir = os.path.join(parentDir, trts)
+        if not os.path.isdir(trtsDir):
+            continue
         pids[trts] = set()
         for img in os.listdir(trtsDir):
             sp = img.split("_")
             patient_id = sp[0] + "_" + sp[1]
             pids[trts].add(patient_id)
-            if test and len(pids[trts]) >= 50:        # take a much smaller subset of images for testing the model so I dont have to wait 2 minutes every time
-                break
+
+    if test:
+        pids["training"] = ["duke_612", "duke_778", "ispy2_255078", "ispy2_410083"]
+        pids["testing"] = ["duke_385"]
     
     for trts in pids.keys():
         data[trts] = {}
         ids = pids[trts]
         trtsDir = os.path.join(parentDir, trts)
         for pid in ids:
-            data[trts][pid] = {}
-            data[trts][pid]["phase"] = {}
             imgs = glob.glob(os.path.join(trtsDir, f"{pid}*.zarr"))
-            for img in imgs:
-                if "seg" in img:
-                    data[trts][pid]["seg"] = loadImagePatches(img, device, PATCH_SIZE, CHUNK_SIZE, retIndices=True)
-                elif "dmap" in img:
-                    data[trts][pid]["dmap"] = loadImagePatches(img, device, PATCH_SIZE, CHUNK_SIZE)
-                else:
-                    p = int(img.split('.')[0][-1])
-                    data[trts][pid]["phase"][p] = loadImagePatches(img, device, PATCH_SIZE, CHUNK_SIZE)
+            bboxPath = os.path.join(trtsDir, f"{pid}_bbox.txt")
+            with open(bboxPath, 'r') as f:
+                bbox = eval(f.read().strip())
+            
+            handle = loadImagePatches(imgs, device, PATCH_SIZE, NUM_PATCHES,
+                                       oversample=oversample, fgBox=bbox,
+                                       loadWholeImage=(trts=="testing"))
+            data[trts][pid] = handle
     
     data["validation"] = {}
     trainingKeys = list(data["training"].keys())
@@ -60,6 +62,11 @@ def GetData(parentDir: str, device: torch.device, test: bool = False):
         if np.random.random() > 0.9:        # move 10% of training cases to validation
             data["validation"][patient_id] = data["training"][patient_id]
             del data["training"][patient_id]
+
+    if test:
+        data["validation"] = {}
+        data["validation"]["duke_612"] = data["training"]["duke_612"]
+        del data["training"]["duke_612"]
 
     print(f"Got data: train is {len(data['training'])}, val is {len(data['validation'])}, test is {len(data['testing'])}")
 
@@ -73,54 +80,38 @@ def GetBinaryArrayFromTrainingTensor(tensor: torch.Tensor):
 
     return binaryTensor.int()
 
-
-def chunkToPatches(chunk: torch.Tensor, patchSize: int):
-    # Reshape the chunk to add a batch dimension if necessary
-    if chunk.dim() == 3:
-        chunk = chunk.unsqueeze(0)  # Add batch dimension
-
-    # Use unfold to extract patches along each dimension
-    patches = chunk.unfold(1, patchSize, patchSize)
-    patches = patches.unfold(2, patchSize, patchSize)
-    patches = patches.unfold(3, patchSize, patchSize)
-
-    # Reshape the patches to combine all dimensions into a single batch
-    patches = patches.contiguous().view(-1, patchSize, patchSize, patchSize)
-
-    return patches.to(chunk.device)
-
-
-def loadChunk(zarrArray: zarr.Array, device: torch.device, patchSize: int, chunkSize: tuple[int], startIndex: tuple[int], retIndices: bool = False):
-    assert len(zarrArray.shape) == 3, f"Expected zarrArray to be 3D image with no channels, got shape {zarrArray.shape}"
-    X, Y, Z = zarrArray.shape
-    pX = X // patchSize
-    pY = Y // patchSize
-    pZ = Z // patchSize
-
-    xStart = startIndex[0] * patchSize
-    yStart = startIndex[1] * patchSize
-    zStart = startIndex[2] * patchSize
-    xEnd   = min(xStart + chunkSize[0] * patchSize, pX * patchSize)
-    yEnd   = min(yStart + chunkSize[1] * patchSize, pY * patchSize)
-    zEnd   = min(zStart + chunkSize[2] * patchSize, pZ * patchSize)
-
-    chunk = torch.tensor(zarrArray[xStart:xEnd, yStart:yEnd, zStart:zEnd]).to(device)
-    patches = chunkToPatches(chunk, patchSize)
-
-    if not retIndices: return patches
-
-    patchIdxs = []
-    for i in range(min(chunkSize[0], pX)):
-        for j in range(min(chunkSize[1], pY)):
-            for k in range(min(chunkSize[2], pZ)):
-                coord = (startIndex[0] + i, startIndex[1] + j, startIndex[2] + k)
-                # idx = getPatchIndexFromCoord(coord, pY, pZ)
-                patchIdxs.append(coord)
-
-    patchIdxs = torch.tensor(patchIdxs).to(device)  # Shape: (numPatches)
-
-    assert len(patches) == len(patchIdxs), "Patch indexing is wrong!"
-    return patches, patchIdxs
+# need to select patch indices inside of function handle since we want it to be consistent for all images in a case,
+# but it should pick different patches each iteration
+def getPatches(segPaths: list[str], dmapPaths: list[str], phasePaths: list[str], device: torch.device, patchSize: int,
+               numPatches: int, oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool):
+    shape = zarr.open(segPaths[0], mode='r').shape
+    patchIndices = getIndices(numPatches, patchSize, shape, 
+                              oversample=oversample, fgBox=fgBox, 
+                              loadWholeImage=loadWholeImage)
+    
+    # I know this is not very readable, but all we're doing is looping over opened Zarr arrays from the paths
+    # then loading each patch from the randomly generated indices for each path.
+    # segImgs and dmapImgs should only have 1 image each, but it hurts my brain less to just do them all the same way
+    segImgs     = torch.tensor(
+                    np.array(
+                        [[zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] for idx in patchIndices] 
+                            for zarrArray in [zarr.open(path, mode='r') for path in segPaths]]
+                    )).to(device, dtype=DTYPE_SEG)
+    dmapImgs    = torch.tensor(
+                    np.array(
+                        [[zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] for idx in patchIndices] 
+                            for zarrArray in [zarr.open(path, mode='r') for path in dmapPaths]]
+                    )).to(device, dtype=DTYPE_DMAP)
+    phaseImgs   = torch.tensor(
+                    np.array(
+                        [[zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] for idx in patchIndices] 
+                            for zarrArray in [zarr.open(path, mode='r') for path in phasePaths]]
+                    )).to(device, dtype=DTYPE_PHASE)
+    
+    # TODO: Finish me!
+    pcrValues   = [None]
+    
+    return segImgs, dmapImgs, phaseImgs, pcrValues, patchIndices
 
 def getPatchIndexFromCoord(index: tuple[int], pY, pZ):
     return index[2] + index[1]*pZ + index[0]*pZ*pY
@@ -128,61 +119,77 @@ def getPatchIndexFromCoord(index: tuple[int], pY, pZ):
 # i feel very clever for this approach ;)
 # Store partial handles in a data structure
 # and then run them only when I need them (making sure to delete the arrays after to save memory)
-def loadImagePatches(path: str, device: torch.device, patchSize: int = 32, chunkSize: tuple[int] = (4, 4, 2), retIndices: bool = False):
-    assert path.endswith('.zarr'), "Only .zarr files are supported."
+# return segImg handles, dmapImg handles, [phaseImg handles for p in nPhases] 
+def loadImagePatches(paths: list[str], device: torch.device, patchSize: int, 
+                     numPatches: int, oversample: float, fgBox: tuple[list[int]],
+                     loadWholeImage: bool = False):
+    assert all(path.endswith('.zarr') for path in paths), "Only .zarr files are supported."
 
-    zarrArray = zarr.open(path, mode='r')
-    try:
-        X, Y, Z = zarrArray.shape
-    except:
-        print(f"failed on path {path}")
-        return None, None
+    segPaths    = [p for p in paths if "seg" in p]
+    dmapPaths   = [p for p in paths if "dmap" in p]
+    phasePaths  = [p for p in paths if "seg" not in p and "dmap" not in p]
     
-    # These shouldn't have any remainder since the data was padded to fit the 32 patch size!
-    pX = X // patchSize         # num patches in x axis of entire image
-    pY = Y // patchSize
-    pZ = Z // patchSize
+    # need images in ascending order!
+    segPaths.sort()
+    dmapPaths.sort()
+    phasePaths.sort()
 
-    chunkIndices = getChunkIndices(pX, pY, pZ, chunkSize)
+    return partial(getPatches, segPaths, dmapPaths, phasePaths, device, patchSize, numPatches, oversample, fgBox, loadWholeImage)
 
-    handles = [partial(loadChunk, zarrArray, device, patchSize, chunkSize, chidx, retIndices)
-               for chidx in chunkIndices]
+# randomly sample N patches
+def getIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool = False):
+    if loadWholeImage:
+        pX, pY, pZ = getFullImageIndices(imgShape, patchSize, minOverlap=patchSize // 4)
+        return list(product(pX, pY, pZ))
     
-    return handles
+    maxXYZ = [c - patchSize for c in imgShape]
+    minFG, maxFG = fgBox
+    indices = []
+    for _ in range(numPatches):
+        if np.random.rand() < oversample:
+            # sample the start index from 
+            r1 = range(minFG[0] - patchSize // 2, maxFG[0] - patchSize // 2)
+            r2 = range(minFG[1] - patchSize // 2, maxFG[1] - patchSize // 2)
+            r3 = range(minFG[2] - patchSize // 2, maxFG[2] - patchSize // 2)
+            start = (np.random.choice(r1),
+                     np.random.choice(r2),
+                     np.random.choice(r3))
+        else:
+            start = (np.random.choice(range(maxXYZ[0])),
+                     np.random.choice(range(maxXYZ[1])),
+                     np.random.choice(range(maxXYZ[2])))
+        indices.append(start)
+    return indices
 
-def getChunkIndices(pX, pY, pZ, chunkSize):
-    # if we have a chunk size greater than or equal to image, we only need one chunk
-    if pX <= chunkSize[0] and pY <= chunkSize[1] and pZ <= chunkSize[2]:
-        return [(0, 0, 0)]
-
-    n = 2       # overlap chunks by #patches/2 in each direction
-    assert np.all(np.array(chunkSize) >= n), "Need chunk size to be at least a big as expected overlap."
-    assert np.all(np.array(chunkSize) % n == 0), f"Expected chunk size to be divisible by overlap ({n}) in all directions."
-
-    nX = max(1, pX // (chunkSize[0] // n))      # Num chunks in x axis, overlapping by half
-    nX = max(1, nX - (1 - pX % nX))             # Must be at least 1; if ^^^ has no remainder, subtract 1
-    nY = max(1, pY // (chunkSize[1] // n))
-    nY = max(1, nY - (1 - pY % nY))
-    nZ = max(1, pZ // (chunkSize[2] // n))
-    nZ = max(1, nZ - (1 - pZ % nZ))
-    indices = []                                # this method is called getChunkIndices but these are the indices w.r.t. patches in the chunk
-    for i in range(nX):
-        x = min(i * chunkSize[0] / n, pX - chunkSize[0])    # make sure we don't index out-of-bounds! last chunk of odd-#patches images will have more overlap on this axis
-        x = max(x, 0)                                       # don't use negative indices please.
-        for j in range(nY):
-            y = min(j * chunkSize[1] / n, pY - chunkSize[1])
-            y = max(y, 0)
-            for k in range(nZ):
-                z = min(k * chunkSize[2] / n, pZ - chunkSize[2])
-                z = max(z, 0)
-                indices.append((int(x), int(y), int(z)))
+def getFullImageIndices(imageShape, patchSize, minOverlap):
+    def computeIdealStride(imageSize, patchSize, minOverlap):
+        assert patchSize <= imageSize, "Patch must be smaller than or equal to image size"
+        maxStride = patchSize - minOverlap
+        numPatches = math.ceil((imageSize - patchSize) / maxStride) + 1
+        stride = (imageSize - patchSize) // (numPatches - 1) + 1 if numPatches > 1 else 0
+        return stride
     
-    return indices                              # if you want actual coordinates, just multiply each index by patch size!
+    def computeAxisIndices(imageLen, patchLen, strideLen):
+        indices = list(range(0, max(imageLen - patchLen + 1, 1), strideLen))
+        if indices[-1] + patchLen < imageLen:
+            indices.append(imageLen - patchLen)
+        return indices
+    
+    x, y, z = imageShape
+    xStride = computeIdealStride(x, patchSize, minOverlap)
+    yStride = computeIdealStride(y, patchSize, minOverlap)
+    zStride = computeIdealStride(z, patchSize, minOverlap)
+    
+    xIndices = computeAxisIndices(x, patchSize, xStride)
+    yIndices = computeAxisIndices(y, patchSize, yStride)
+    zIndices = computeAxisIndices(z, patchSize, zStride)
 
-def reconstructImageFromPatches(patches: list[torch.Tensor], patchCoords: list[list[torch.Tensor]], patchSize: int):
+    return xIndices, yIndices, zIndices
+
+def reconstructImageFromPatches(patches: list[torch.Tensor], patchCoords: list[torch.Tensor], patchSize: int):
     # Determine the target dimensions from the maximum coordinates in patchCoords
     max_coords = torch.max(torch.cat(patchCoords), dim=0).values
-    target_dims = (max_coords + 1) * patchSize
+    target_dims = max_coords + patchSize
     target_dims = target_dims.tolist()
 
     # Initialize the reconstructed image and a weight map for averaging overlaps
@@ -192,8 +199,8 @@ def reconstructImageFromPatches(patches: list[torch.Tensor], patchCoords: list[l
     for chunk, coords in zip(patches, patchCoords):
         for patch, coord in zip(chunk, coords):
             # Calculate the slice indices for the patch
-            d_start, h_start, w_start = coord * patchSize
-            d_end, h_end, w_end = d_start + patchSize, h_start + patchSize, w_start + patchSize
+            d_start, h_start, w_start = coord
+            d_end, h_end, w_end = coord + patchSize
 
             # Add the patch to the reconstructed image and update the weight map
             reconstructed_image[d_start:d_end, h_start:h_end, w_start:w_end] += patch.float()
@@ -264,11 +271,11 @@ def Crop(image, nonzeroCoords: np.ndarray) -> sitk.Image:
 
 if __name__ == "__main__":
     print("Starting program!")
-    path = r"E:\MAMA-MIA\my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm\training\ispy2_738041_seg.zarr"
-    outFolder = os.path.dirname(os.path.dirname(path))
-    arr = zarr.load(path)
+    filePath = r"E:\MAMA-MIA\my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm\training\ispy2_738041_seg.zarr"
+    outFolder = os.path.dirname(os.path.dirname(filePath))
+    arr = zarr.load(filePath)
     # print(arr.dtype)
-    if "seg" in path:
+    if "seg" in filePath:
         arr = arr.astype(int)
     nii = sitk.GetImageFromArray(arr)
     sitk.WriteImage(nii, os.path.join(outFolder, "og.nii"))
@@ -277,7 +284,7 @@ if __name__ == "__main__":
     patchSize = 32
     dev = torch.device("cuda")
 
-    handles, indices = loadImagePatches(path, dev, patchSize=patchSize)
+    handles, indices = loadImagePatches(filePath, dev, patchSize=patchSize)
 
     allPatches  = []
     allCoords   = []
@@ -292,7 +299,7 @@ if __name__ == "__main__":
     print(f"there are {len(allCoords)} coords")
 
     recon: torch.Tensor = reconstructImageFromPatches(allPatches, allCoords, patchSize, dev)
-    if "seg" in path:
+    if "seg" in filePath:
         recon = recon.int()
 
     sitk.WriteImage(sitk.GetImageFromArray(recon.cpu().detach().numpy()), os.path.join(outFolder, "recon.nii"))

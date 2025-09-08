@@ -1,9 +1,7 @@
 import random
 import torch
-import numpy as np
 from DataProcessing import GetData
 from torch.utils.data import Dataset, Sampler
-from helpers import IMAGE_TYPES
 
 # need this to load and track training data along with dmap vectors
 # group tensors by patient ID 
@@ -14,25 +12,10 @@ class CustomDataset(Dataset):
         self.data = data
 
     def __getitem__(self, ind: str):
-        # unpack id and transform from index
         patientID = ind
-        
-        # need MRIs, dmap, and seg
-        images = {}
-        for imageType in IMAGE_TYPES:
-            if not imageType in self.data[patientID].keys():
-                # print(f"{imageType} not found in {self.data[patientID].keys()}")
-                continue
-
-            images[imageType] = {}
-            match imageType:
-                case "seg" | "dmap":
-                    images[imageType] = self.data[patientID][imageType]
-                case "phase":
-                    for phase in self.data[patientID][imageType].keys():
-                        images[imageType][phase] = self.data[patientID][imageType][phase]
+        handle = self.data[patientID]
                         
-        return images, patientID
+        return handle, patientID
     
 class CustomSampler(Sampler):
     def __init__(self, ind, shuffle=False, seed=None):
@@ -53,9 +36,9 @@ class CustomSampler(Sampler):
         return len(self.indices)
 
 # TODO: Make batch sampler that takes patients with matching # phases
-def GetDataloaders(dataDir: str, device: torch.device, batchSize: int = 1, shuffle=True, test=False):
+def GetDataloaders(dataDir: str, device: torch.device, oversample: float, batchSize: int = 1, shuffle=True, test=False):
     my_collate = lambda x: x[0]         # unpack from singleton list
-    data = GetData(dataDir, device, test=test)
+    data = GetData(dataDir, device, oversample, test=test)
     trDataset = CustomDataset(data=data["training"])
     trPIDs = list(data["training"].keys())
     trSampler = CustomSampler(trPIDs, shuffle=shuffle)

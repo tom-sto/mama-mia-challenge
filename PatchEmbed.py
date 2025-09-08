@@ -13,7 +13,6 @@ def init_weights_conv(module):
 class PatchEncoder(nn.Module):
     def __init__(self, channels: list[int], strides: list[int], dropout: float = 0.2, useSkips: bool = False):
         super().__init__()
-        self.channels = channels
         self.encoder = nn.ModuleList([])
         self.decoder = nn.ModuleList([])
         numBlocks = len(channels) - 1
@@ -69,11 +68,12 @@ class PatchEncoder(nn.Module):
 class PatchDecoder(nn.Module):
     def __init__(self, channels: list[int], useSkips: bool = False):
         super().__init__()
-        self.channels = channels
-        # print(f"DECODER CHANNELS: {self.channels}")     # [1, 32, 64, 128, 256, 320, 320]
+        # print(f"DECODER CHANNELS: {channels}")     # [1, 32, 64, 128, 256, 320, 320]
         self.encoder = nn.ModuleList([])
         self.decoder = nn.ModuleList([])
         numBlocks = len(channels) - 1
+        if channels[0] == 1:
+            channels[0] = 2       # We want to output background and foreground separately since this helps with Dice loss
 
         self.useSkips = useSkips
         for i in range(numBlocks):
