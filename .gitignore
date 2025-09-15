@@ -10,3 +10,4 @@ notebooks
 segData*
 *.pth
 Untitled*
+my_preprocessed_data

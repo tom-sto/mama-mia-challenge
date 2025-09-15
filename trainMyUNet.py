@@ -100,6 +100,7 @@ class MyTrainer():
             assert modelName is not None, "Cannot continue training if no model state is given."
             self.loadModel(modelName)
             print(f"Continuing training from epoch {self.currentEpoch}")
+            self.nEpochs = self.currentEpoch + 1
 
         startEpoch = self.currentEpoch
         bestSeg = 10.
@@ -126,6 +127,8 @@ class MyTrainer():
             lr = self.optimizer.param_groups[0]["lr"]
             if self.writer:
                 self.writer.add_scalar("LR", lr, self.currentEpoch)
+
+            self.model.train()
 
             startEpoch = time()
             for idx, struct in enumerate(self.trDataloader):        # iterate over patient cases
@@ -222,6 +225,8 @@ class MyTrainer():
             bdLossesVal = []
             pcrLossesVal = []
             diceVal = []
+            self.model.eval()       # WHY DOES THIS KILL MY PERFORMANCE!?!?!
+
             for idx, struct in enumerate(self.vlDataloader):        # iterate over patient cases
                 handle, patientIDs = struct
 
@@ -257,7 +262,7 @@ class MyTrainer():
                 # now only do foreground for "real" Dice score
                 segOut: torch.Tensor = (segOut[:, 1] > 0).int()
                 dice = Dice(segOut.detach().cpu(), target[:, 1].detach().cpu())
-                diceThisEpoch.append(dice)
+                diceVal.append(dice)
 
                 if self.joint and pcrLoss:
                     pcrLossesVal.append(pcrLoss.item())
@@ -350,7 +355,7 @@ class MyTrainer():
         print("Running inference!")
         # TODO: Finish me
         scoreDF = pd.DataFrame(columns=["Patient ID", "Dice", "HD95", "PCR", "PCR Pred"])
-        for struct in self.tsDataloader:
+        for struct in self.trDataloader:
             handle, patientID = struct
 
             # print(f"thing {idx}, {patientIDs}: {obj.keys()}")
@@ -396,7 +401,7 @@ class MyTrainer():
             sitk.WriteImage(sitk.GetImageFromArray(phaseImageArr),
                             os.path.join(outputPath, f"{patientID}_phase.nii"))
             
-            print(f"Finished patient {patientID}:\n\tDice {dice:.4f}\tHausdorff 95 {hausdorff:.4f}", end="\r")
+            print(f"Finished patient {patientID}:\tDice {dice:.4f}\tHausdorff 95 {hausdorff:.4f}")
         print()
         scoreDF.to_csv(os.path.join(self.outputFolder, f"outputs{self.tag}", "scores.csv"))
 
@@ -458,28 +463,33 @@ class MyTrainer():
         self.LRScheduler.load_state_dict(stateDict["schedulerState"])
         self.currentEpoch = stateDict["epoch"]
 
+def hackyForceBatchNormTrain(m):
+    if isinstance(m, torch.nn.BatchNorm3d):
+        m.train()
+
+
 if __name__ == "__main__":
     writer = SummaryWriter()
     datasetName = "Dataset106_cropped_Xch_breast_no_norm"
     dataDir = rf"F:\MAMA-MIA\my_preprocessed_data\{datasetName}"
     # pretrainedDecoderPath = "pretrained_weights/nnunet_pretrained_weights_64_best.pth"
     pretrainedDecoderPath = None
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     bottleneck = BOTTLENECK_TRANSFORMERST
     # bottleneck = BOTTLENECK_CONV
     skips = True
     joint = False
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
-    modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=100, modelName=modelName, tag="FullChannels", joint=joint, test=test)
+    modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
+    trainer = MyTrainer(nEpochs=50, modelName=modelName, tag="FullChannels", joint=joint, test=test)
     
     trainer.setup(dataDir, 
                   device, 
                   pretrainedDecoderPath=pretrainedDecoderPath, 
                   useSkips=True, 
                   bottleneck=bottleneck)       
-    # trainer.train(continueTraining=True, modelName="LatestChannels24-96-256.pth")
-    trainer.train()
+    trainer.train(continueTraining=True, modelName="LatestFullChannels.pth")
+    # trainer.train()
     trainer.inference(f"Latest{trainer.tag}.pth")
     # trainer.inference(f"BestSeg{trainer.tag}.pth")
