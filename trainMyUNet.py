@@ -333,16 +333,6 @@ class MyTrainer():
         print("Done training!")
         print(f"\tTook {FormatSeconds(time() - start)}.")
         return
-        segOut = (segOut > 0.5).int()
-
-        print(segOut.shape)
-        
-        reconSeg = reconstructImageFromPatches(segOut.detach().cpu(), [patchIdxs], PATCH_SIZE)
-        sitk.WriteImage(sitk.GetImageFromArray(reconSeg.numpy()), "reconSeg.nii")
-
-        print(phases.shape)
-        reconInp = reconstructImageFromPatches(phases[:,0].cpu(), [patchIdxs], PATCH_SIZE)
-        sitk.WriteImage(sitk.GetImageFromArray(reconInp.numpy()), "reconInp.nii")
 
     def inference(self, stateDictPath: str, outputPath: str = "predSegmentationsCropped", outputPathPCR: str = "predPCR"):
         stateDictPath = os.path.join(self.outputFolder, stateDictPath)
@@ -490,7 +480,7 @@ if __name__ == "__main__":
     skips = True
     joint = False
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
-    modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
+    modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips{"-TEST" if test else ""}"
     trainer = MyTrainer(nEpochs=100, modelName=modelName, tag="FixedLosses", joint=joint, test=test)
     
     trainer.setup(dataDir, 

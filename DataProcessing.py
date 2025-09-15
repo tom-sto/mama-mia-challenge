@@ -98,7 +98,7 @@ def loadImagePatches(paths: list[str], device: torch.device, patchSize: int,
     acqTimes = patientDF[patientDF["patient_id"] == patientID]["acquisition_times"].iloc[0]
     if not pd.isna(acqTimes):
         acqTimes = eval(acqTimes)
-        nPhases = sum([int(x <= ACQ_TIME_THRESHOLD) for x in acqTimes])
+        nPhases = max(2, sum([int(x <= ACQ_TIME_THRESHOLD) for x in acqTimes]))
         phasePaths = phasePaths[:nPhases]
 
     segZarrs = [zarr.open(p, mode='r') for p in segPaths]

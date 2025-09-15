@@ -3,7 +3,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from AttentionPooling import AttentionPooling
-from helpers import PositionEncoding, PositionEncoding3D, CleanPatientData
+from helpers import PositionEncoding, PositionEncoding3D, CleanPatientData, ACQ_TIME_THRESHOLD
 
 class MyTransformerST(nn.Module):
     def __init__(self,
@@ -88,6 +88,7 @@ class MyTransformerST(nn.Module):
 
             acq_times = md["acquisition_times"]
             if acq_times is not None:
+                acq_times = [x for x in acq_times if x <= ACQ_TIME_THRESHOLD]
                 assert len(acq_times) == T, f"Expected acquisition times to match num phases: {T}, got {len(acq_times)}"
                 acqTimes[idx] = torch.tensor(acq_times).expand(N*X*Y*Z, -1)
 

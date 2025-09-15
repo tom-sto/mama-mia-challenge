@@ -140,7 +140,7 @@ class SegLoss(nn.Module):
         # oldDiceLoss = self.OldDiceLoss(x, target)
         diceLoss = self.DiceLoss(x, target)
         bdLoss   = self.BDLoss(x, dmaps)
-        return bceLoss * self.BCEWeight, (1 + diceLoss) * self.DiceWeight, (1 + bdLoss) * self.BDWeight
+        return bceLoss * self.BCEWeight, diceLoss * self.DiceWeight, (1 + bdLoss) * self.BDWeight
 
 # Assume input and target are same size (X, Y, Z) and the values of each entry are binary.
 # Return Dice loss and Dice score

@@ -19,12 +19,14 @@ class PatchEncoder(nn.Module):
 
         self.useSkips = useSkips
 
+        self.groups = [min(max(round(ch // 4), 1), 32) for ch in channels]
+
         # use the same encoder block design as my autoencoder! that worked pretty well!
         # we can use batch norm even if the batch size is 1 because we artifically inflate it with the patches
         for i in range(numBlocks):
             encBlock = nn.Sequential(
                 nn.Dropout3d(dropout) if i == numBlocks - 1 else nn.Identity(),
-                nn.InstanceNorm3d(channels[i]),
+                nn.GroupNorm(self.groups[i], channels[i]) if i != 0 else nn.LayerNorm(channels[i]),
                 nn.Conv3d(channels[i], channels[i], kernel_size=3, padding=1) if i == 0 or i == 1 else nn.Identity(),
                 nn.Conv3d(channels[i], channels[i + 1], kernel_size=3, padding=1),
                 nn.ReLU(True),
@@ -72,20 +74,22 @@ class PatchDecoder(nn.Module):
         self.decoder = nn.ModuleList([])
         numBlocks = len(channels) - 1
 
+        self.groups = [min(max(round(ch // 4), 1), 32) for ch in channels]
+
         self.useSkips = useSkips
         for i in range(numBlocks):
             if self.useSkips:
                 decBlock = nn.Sequential(
                     nn.ConvTranspose3d(2*channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
                     nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
-                    nn.InstanceNorm3d(channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
+                    nn.GroupNorm(self.groups[i], channels[i]) if i != 0 else nn.LayerNorm(channels[i]) if i < numBlocks - 1 else nn.Identity(),
                     nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
                 )
             else:
                 decBlock = nn.Sequential(
                     nn.ConvTranspose3d(channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
                     nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
-                    nn.InstanceNorm3d(channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
+                    nn.GroupNorm(self.groups[i], channels[i]) if i != 0 else nn.LayerNorm(channels[i]) if i < numBlocks - 1 else nn.Identity(),
                     nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
                 )
 
