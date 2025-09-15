@@ -18,7 +18,6 @@ class MyUNet(torch.nn.Module):
                  bottleneck: str = "TransformerST",
                  nBottleneckLayers: int = 4):
         super().__init__()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         self.encoder = PatchEncoder(expectedChannels, expectedStride, useSkips=useSkips)
         self.decoder = PatchDecoder(expectedChannels, useSkips)
@@ -47,12 +46,10 @@ class MyUNet(torch.nn.Module):
 
     def forward(self, x: torch.Tensor, patientIDs: list[str], patchIdxs: list[tuple[int]], patientData: list = None):
         x, skips, shape = self.encoder(x)
-        # print(f"shape after enc: {x.shape}")
-        # print(f"skips: {[skips[i].shape for i in range(len(skips))]}")
 
         x = self.bottleneck(x, shape, patientIDs, patchIdxs)
         if "seg" not in self.ret or "Transformer" in self.bottleneckType:
-            sharedFeatures, clsToken = x    # unpack cls if our bottleneck allows
+            sharedFeatures, pcrToken = x    # unpack cls if our bottleneck allows
             x: torch.Tensor = sharedFeatures
 
         segOut: torch.Tensor = self.decoder(x.reshape(-1, *x.shape[2:]), skips)
@@ -62,7 +59,7 @@ class MyUNet(torch.nn.Module):
         elif self.ret == "segOnly":
             return segOut
 
-        pcrOut = self.classifier(clsToken)
+        pcrOut = self.classifier(pcrToken)
 
         if self.ret == "all":
             return segOut, sharedFeatures, pcrOut

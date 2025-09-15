@@ -10,7 +10,7 @@ from time import time
 from concurrent.futures import ProcessPoolExecutor
 
 RAW_DIR = r"F:\MAMA-MIA\nnUNet_raw\Dataset106_cropped_Xch_breast_no_norm"
-PP_DIR  = r"F:\MAMA-MIA\my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm"
+PP_DIR  = r".\my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm"
 TR_DIR = join(RAW_DIR, "imagesTr")
 TS_DIR = join(RAW_DIR, "imagesTs")
 LB_DIR = r"F:\MAMA-MIA\segmentations\expert"
@@ -91,51 +91,41 @@ def do_training_case(patient_id, TR_DIR, PP_DIR, LB_DIR):
     outPathSeg = join(PP_DIR, "training", patient_id + "_seg.zarr")
     outPathDmap = join(PP_DIR, "training", patient_id + "_dmap.zarr")
 
-    for file_path in glob.glob(os.path.join(TR_DIR, patient_id + "*.nii.gz")):
-        outPath = join(PP_DIR, "training", file_path.split("\\")[-1][:-7])
-        img = sitk.Cast(sitk.ReadImage(file_path), sitk.sitkFloat32)
-        resImg = reorient_and_resample(img)
-        # paddedImg = pad_to_patch_compatible_size(resImg)
+    # for file_path in glob.glob(os.path.join(TR_DIR, patient_id + "*.nii.gz")):
+    #     outPath = join(PP_DIR, "training", file_path.split("\\")[-1][:-7])
+    #     img = sitk.Cast(sitk.ReadImage(file_path), sitk.sitkFloat32)
+    #     resImg = reorient_and_resample(img)
+    #     # paddedImg = pad_to_patch_compatible_size(resImg)
 
-        arr = sitk.GetArrayFromImage(resImg).astype(np.float16)
-        save_zarr(outPath + ".zarr", arr)
-        # sitk.WriteImage(sitk.GetImageFromArray(arr), outPath + ".nii")
-    print(f"\tFinished phases for {patient_id}")
+    #     arr = sitk.GetArrayFromImage(resImg).astype(np.float16)
+    #     save_zarr(outPath + ".zarr", arr)
+    #     # sitk.WriteImage(sitk.GetImageFromArray(arr), outPath + ".nii")
+    # print(f"\tFinished phases for {patient_id}")
 
-    segImgPath = join(LB_DIR, patient_id + ".nii.gz")
-    segImg = sitk.ReadImage(segImgPath)
-    croppedSeg = crop_to_bounding_box(segImg, patient_id)
-    resSeg = reorient_and_resample(croppedSeg, interpolator=sitk.sitkNearestNeighbor)
-    # paddedSeg = pad_to_patch_compatible_size(resSeg)
+    # segImgPath = join(LB_DIR, patient_id + ".nii.gz")
+    # segImg = sitk.ReadImage(segImgPath)
+    # croppedSeg = crop_to_bounding_box(segImg, patient_id)
+    # resSeg = reorient_and_resample(croppedSeg, interpolator=sitk.sitkNearestNeighbor)
 
-    seg = sitk.GetArrayFromImage(resSeg).astype(bool)
-    save_zarr(outPathSeg, seg)
+    # seg = sitk.GetArrayFromImage(resSeg).astype(bool)
+    # save_zarr(outPathSeg, seg)
 
-    minFG, maxFG = get_foreground_bbox(seg)
-    with open(join(PP_DIR, "training", patient_id + "_bbox.txt"), mode="w+") as f:
-        f.write(str(minFG) + ", " + str(maxFG))
-    print(f"\tFinished seg for {patient_id}")
+    # minFG, maxFG = get_foreground_bbox(seg)
+    # with open(join(PP_DIR, "training", patient_id + "_bbox.txt"), mode="w+") as f:
+    #     f.write(str(minFG) + ", " + str(maxFG))
+    # print(f"\tFinished seg for {patient_id}")
+
+    seg = zarr.load(outPathSeg).astype(bool)
     
     # get dmap for training set
     dist: np.ndarray = edt(seg)         # positive in foreground, 0 background
     inv: np.ndarray = edt(~seg)         # positive in background, 0 foreground
     dmap: np.ndarray = inv - dist       # negative in foreground, positive in background
-    dmap = dmap.astype(np.float16)
-
-    max_val = np.max(dmap)
-    min_val = np.min(dmap)
-    normDmap = np.empty_like(dmap, dtype=np.float16)
-    if max_val != 0:
-        mask = dmap > 0
-        normDmap[mask] = dmap[mask] / max_val
-    if min_val != 0:
-        mask = dmap < 0
-        normDmap[mask] = dmap[mask] / (-min_val)
     
-    save_zarr(outPathDmap, normDmap.astype(np.float16))
+    save_zarr(outPathDmap, dmap.astype(np.float16))
     print(f"\tFinished dmap for {patient_id}")
 
-    assert dmap.shape == seg.shape == arr.shape
+    assert dmap.shape == seg.shape #== arr.shape
 
 def do_testing_case(patient_id, TS_DIR, PP_DIR, LB_DIR):
     print(f"Processing {patient_id}")
@@ -202,9 +192,9 @@ def main():
     os.makedirs(join(PP_DIR, "testing"), exist_ok=True)
 
     start = time()
-    with ProcessPoolExecutor(max_workers=8) as executor:
+    with ProcessPoolExecutor() as executor:
         list(executor.map(training_wrapper, df['train_split'].dropna().apply(str.lower).tolist()))
-        list(executor.map(testing_wrapper, df['test_split'].dropna().apply(str.lower).tolist()))
+        # list(executor.map(testing_wrapper, df['test_split'].dropna().apply(str.lower).tolist()))
 
     print(f"Took {FormatSeconds(time() - start)} to finish processing all data")
 

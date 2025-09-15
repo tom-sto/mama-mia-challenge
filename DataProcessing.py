@@ -3,9 +3,10 @@ import torch
 import zarr, math
 import numpy as np
 import SimpleITK as sitk
+import pandas as pd
 from functools import partial
 from itertools import product
-from helpers import PATCH_SIZE, NUM_PATCHES, DTYPE_SEG, DTYPE_DMAP, DTYPE_PHASE
+from helpers import PATCH_SIZE, NUM_PATCHES, DTYPE_SEG, DTYPE_DMAP, DTYPE_PHASE, ACQ_TIME_THRESHOLD
 
 ''' 
 data {
@@ -19,10 +20,12 @@ data {
     }
 }
 '''
-def GetData(parentDir: str, device: torch.device, oversample: float = 0., test: bool = False):
+def GetData(parentDir: str, device: torch.device, patientDataPath: str, oversample: float = 0., test: bool = False, ):
     print("Collecting data...")
-    # assume this dir is E:\MAMA-MIA\my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm
+    # assume this dir is my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm
     data = {}
+    
+    df = pd.read_excel(patientDataPath, "dataset_info")
 
     np.random.seed(420)
 
@@ -51,7 +54,7 @@ def GetData(parentDir: str, device: torch.device, oversample: float = 0., test: 
             with open(bboxPath, 'r') as f:
                 bbox = eval(f.read().strip())
             
-            handle = loadImagePatches(imgs, device, PATCH_SIZE, NUM_PATCHES,
+            handle = loadImagePatches(imgs, device, PATCH_SIZE, NUM_PATCHES, df,
                                        oversample=oversample, fgBox=bbox,
                                        loadWholeImage=(trts=="testing"))
             data[trts][pid] = handle
@@ -72,57 +75,13 @@ def GetData(parentDir: str, device: torch.device, oversample: float = 0., test: 
 
     return data
 
-def GetBinaryArrayFromTrainingTensor(tensor: torch.Tensor):
-    maxIndices = torch.argmax(tensor, dim=2, keepdim=True)
-
-    binaryTensor = torch.zeros_like(tensor)  # output tensor with same dimensions
-    binaryTensor.scatter_(1, maxIndices, 1)  # write 1's into all the indices from argmax
-
-    return binaryTensor.int()
-
-# need to select patch indices inside of function handle since we want it to be consistent for all images in a case,
-# but it should pick different patches each iteration
-def getPatches(segPaths: list[str], dmapPaths: list[str], phasePaths: list[str], device: torch.device, patchSize: int,
-               numPatches: int, oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool):
-    shape = zarr.open(segPaths[0], mode='r').shape
-    patchIndices = getIndices(numPatches, patchSize, shape, 
-                              oversample=oversample, fgBox=fgBox, 
-                              loadWholeImage=loadWholeImage)
-    
-    # I know this is not very readable, but all we're doing is looping over opened Zarr arrays from the paths
-    # then loading each patch from the randomly generated indices for each path.
-    # segImgs and dmapImgs should only have 1 image each, but it hurts my brain less to just do them all the same way
-    segImgs     = torch.tensor(
-                    np.array(
-                        [[zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] for idx in patchIndices] 
-                            for zarrArray in [zarr.open(path, mode='r') for path in segPaths]]
-                    )).to(device, dtype=DTYPE_SEG)
-    dmapImgs    = torch.tensor(
-                    np.array(
-                        [[zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] for idx in patchIndices] 
-                            for zarrArray in [zarr.open(path, mode='r') for path in dmapPaths]]
-                    )).to(device, dtype=DTYPE_DMAP)
-    phaseImgs   = torch.tensor(
-                    np.array(
-                        [[zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] for idx in patchIndices] 
-                            for zarrArray in [zarr.open(path, mode='r') for path in phasePaths]]
-                    )).to(device, dtype=DTYPE_PHASE)
-    
-    # TODO: Finish me!
-    pcrValues   = [None]
-    
-    return segImgs, dmapImgs, phaseImgs, pcrValues, patchIndices
-
-def getPatchIndexFromCoord(index: tuple[int], pY, pZ):
-    return index[2] + index[1]*pZ + index[0]*pZ*pY
-
 # i feel very clever for this approach ;)
 # Store partial handles in a data structure
 # and then run them only when I need them (making sure to delete the arrays after to save memory)
 # return segImg handles, dmapImg handles, [phaseImg handles for p in nPhases] 
 def loadImagePatches(paths: list[str], device: torch.device, patchSize: int, 
-                     numPatches: int, oversample: float, fgBox: tuple[list[int]],
-                     loadWholeImage: bool = False):
+                     numPatches: int, patientDF: pd.DataFrame, oversample: float, 
+                     fgBox: tuple[list[int]], loadWholeImage: bool = False):
     assert all(path.endswith('.zarr') for path in paths), "Only .zarr files are supported."
 
     segPaths    = [p for p in paths if "seg" in p]
@@ -134,7 +93,43 @@ def loadImagePatches(paths: list[str], device: torch.device, patchSize: int,
     dmapPaths.sort()
     phasePaths.sort()
 
-    return partial(getPatches, segPaths, dmapPaths, phasePaths, device, patchSize, numPatches, oversample, fgBox, loadWholeImage)
+    patientPath = os.path.basename(phasePaths[0])
+    patientID: str = patientPath[:-10].upper()
+    acqTimes = patientDF[patientDF["patient_id"] == patientID]["acquisition_times"].iloc[0]
+    if not pd.isna(acqTimes):
+        acqTimes = eval(acqTimes)
+        nPhases = sum([int(x <= ACQ_TIME_THRESHOLD) for x in acqTimes])
+        phasePaths = phasePaths[:nPhases]
+
+    segZarrs = [zarr.open(p, mode='r') for p in segPaths]
+    dmapZarrs = [zarr.open(p, mode='r') for p in dmapPaths]
+    phaseZarrs = [zarr.open(p, mode='r') for p in phasePaths]
+
+    return partial(getPatches, segZarrs, dmapZarrs, phaseZarrs, device, patchSize, numPatches, oversample, fgBox, loadWholeImage)
+
+# need to select patch indices inside of function handle since we want it to be consistent for all images in a case,
+# but it should pick different patches each iteration
+def getPatches(segZarrs: list[zarr.Array], dmapZarrs: list[zarr.Array], phaseZarrs: list[zarr.Array], device: torch.device, patchSize: int,
+               numPatches: int, oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool):
+    shape = segZarrs[0].shape
+    patchIndices = getIndices(numPatches, patchSize, shape, 
+                              oversample=oversample, fgBox=fgBox, 
+                              loadWholeImage=loadWholeImage)
+    
+    segImgs     = [np.stack([zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] 
+                             for idx in patchIndices]) for zarrArray in segZarrs]
+    segImgs     = torch.from_numpy(np.array(segImgs)).to(device, dtype=DTYPE_SEG, non_blocking=True)
+    dmapImgs    = [np.stack([zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] 
+                             for idx in patchIndices]) for zarrArray in dmapZarrs]
+    dmapImgs    = torch.from_numpy(np.array(dmapImgs)).to(device, dtype=DTYPE_DMAP, non_blocking=True)
+    phaseImgs   = [np.stack([zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] 
+                             for idx in patchIndices]) for zarrArray in phaseZarrs]
+    phaseImgs   = torch.from_numpy(np.array(phaseImgs)).to(device, dtype=DTYPE_PHASE, non_blocking=True)
+    
+    # TODO: Finish me!
+    pcrValues   = [None]
+    
+    return segImgs, dmapImgs, phaseImgs, pcrValues, patchIndices
 
 # randomly sample N patches
 def getIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool = False):
@@ -147,10 +142,10 @@ def getIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample:
     indices = []
     for _ in range(numPatches):
         if np.random.rand() < oversample:
-            # sample the start index from 
-            r1 = range(minFG[0] - patchSize // 2, maxFG[0] - patchSize // 2)
-            r2 = range(minFG[1] - patchSize // 2, maxFG[1] - patchSize // 2)
-            r3 = range(minFG[2] - patchSize // 2, maxFG[2] - patchSize // 2)
+            # sample the start index from foreground box, but make sure we don't go out of bounds
+            r1 = range(max(minFG[0] - patchSize // 2, 0), min(maxFG[0] - patchSize // 2, maxXYZ[0]))
+            r2 = range(max(minFG[1] - patchSize // 2, 0), min(maxFG[1] - patchSize // 2, maxXYZ[1]))
+            r3 = range(max(minFG[2] - patchSize // 2, 0), min(maxFG[2] - patchSize // 2, maxXYZ[2]))
             start = (np.random.choice(r1),
                      np.random.choice(r2),
                      np.random.choice(r3))
@@ -247,6 +242,14 @@ def unpatchTensor(x: torch.Tensor, numSubpatches: int):
     x = x.reshape(B, C, X, Y, Z)  # [B, C, X, Y, Z]
 
     return x
+
+def GetBinaryArrayFromTrainingTensor(tensor: torch.Tensor):
+    maxIndices = torch.argmax(tensor, dim=2, keepdim=True)
+
+    binaryTensor = torch.zeros_like(tensor)  # output tensor with same dimensions
+    binaryTensor.scatter_(1, maxIndices, 1)  # write 1's into all the indices from argmax
+
+    return binaryTensor.int()
 
 def ConvertBinaryNPArrayToImage(ndarr: np.ndarray):
     argmax = np.argmax(ndarr, axis=0)

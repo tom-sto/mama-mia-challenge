@@ -6,6 +6,8 @@ PATCH_SIZE  = 32
 CHUNK_SIZE  = 64
 NUM_PATCHES = 64
 
+ACQ_TIME_THRESHOLD = 750
+
 DTYPE_SEG   = torch.bool
 DTYPE_DMAP  = torch.float16
 DTYPE_PHASE = torch.float16
@@ -13,6 +15,8 @@ DTYPE_PHASE = torch.float16
 BOTTLENECK_TRANSFORMERST = "TransformerST"
 BOTTLENECK_CONV = "Conv"
 BOTTLENECK_NONE = "None"
+
+EPS = 1e-5
 
 def Mean(l: list):
     if len(l) == 0:

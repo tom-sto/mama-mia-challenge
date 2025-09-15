@@ -35,23 +35,29 @@ class CustomSampler(Sampler):
     def __len__(self):
         return len(self.indices)
 
+def my_collate(x):
+    return x[0]
+
 # TODO: Make batch sampler that takes patients with matching # phases
-def GetDataloaders(dataDir: str, device: torch.device, oversample: float, batchSize: int = 1, shuffle=True, test=False):
-    my_collate = lambda x: x[0]         # unpack from singleton list
-    data = GetData(dataDir, device, oversample, test=test)
+def GetDataloaders(dataDir: str, device: torch.device, patientDataPath: str, oversample: float, 
+                   batchSize: int = 1, shuffle=True, test=False):
+    data = GetData(dataDir, device, patientDataPath, oversample, test=test)
     trDataset = CustomDataset(data=data["training"])
     trPIDs = list(data["training"].keys())
     trSampler = CustomSampler(trPIDs, shuffle=shuffle)
-    trDataloader = torch.utils.data.DataLoader(trDataset, batch_size=batchSize, sampler=trSampler, collate_fn=my_collate)
+    trDataloader = torch.utils.data.DataLoader(trDataset, batch_size=batchSize, sampler=trSampler, collate_fn=my_collate,
+                                               num_workers=4, pin_memory=True, persistent_workers=True)
     
     vlDataset = CustomDataset(data=data["validation"])
     vlPIDs = list(data["validation"].keys())
     vlSampler = CustomSampler(vlPIDs, shuffle=shuffle)
-    vlDataloader = torch.utils.data.DataLoader(vlDataset, batch_size=batchSize, sampler=vlSampler, collate_fn=my_collate)
+    vlDataloader = torch.utils.data.DataLoader(vlDataset, batch_size=batchSize, sampler=vlSampler, collate_fn=my_collate,
+                                               num_workers=4, pin_memory=True, persistent_workers=True)
     
     tsDataset = CustomDataset(data=data["testing"])
     tsPIDs = list(data["testing"].keys())
     tsSampler = CustomSampler(tsPIDs, shuffle=shuffle)
-    tsDataloader = torch.utils.data.DataLoader(tsDataset, batch_size=batchSize, sampler=tsSampler, collate_fn=my_collate)
+    tsDataloader = torch.utils.data.DataLoader(tsDataset, batch_size=batchSize, sampler=tsSampler, collate_fn=my_collate,
+                                               num_workers=4, pin_memory=True, persistent_workers=True)
     
     return trDataloader, vlDataloader, tsDataloader

@@ -24,10 +24,9 @@ class PatchEncoder(nn.Module):
         for i in range(numBlocks):
             encBlock = nn.Sequential(
                 nn.Dropout3d(dropout) if i == numBlocks - 1 else nn.Identity(),
-                nn.BatchNorm3d(channels[i]),
+                nn.InstanceNorm3d(channels[i]),
                 nn.Conv3d(channels[i], channels[i], kernel_size=3, padding=1) if i == 0 or i == 1 else nn.Identity(),
                 nn.Conv3d(channels[i], channels[i + 1], kernel_size=3, padding=1),
-                # nn.BatchNorm3d(channels[i+1]),
                 nn.ReLU(True),
                 nn.MaxPool3d(kernel_size=3, stride=strides[i], padding=1)
             )
@@ -72,8 +71,6 @@ class PatchDecoder(nn.Module):
         self.encoder = nn.ModuleList([])
         self.decoder = nn.ModuleList([])
         numBlocks = len(channels) - 1
-        if channels[0] == 1:
-            channels[0] = 2       # We want to output background and foreground separately since this helps with Dice loss
 
         self.useSkips = useSkips
         for i in range(numBlocks):
@@ -81,14 +78,14 @@ class PatchDecoder(nn.Module):
                 decBlock = nn.Sequential(
                     nn.ConvTranspose3d(2*channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
                     nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
-                    nn.BatchNorm3d(channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
+                    nn.InstanceNorm3d(channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
                     nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
                 )
             else:
                 decBlock = nn.Sequential(
                     nn.ConvTranspose3d(channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
                     nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
-                    nn.BatchNorm3d(channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
+                    nn.InstanceNorm3d(channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
                     nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
                 )
 
