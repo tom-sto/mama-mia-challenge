@@ -11,3 +11,4 @@ segData*
 *.pth
 Untitled*
 my_preprocessed_data
+clinical_and_imaging_info.xlsx

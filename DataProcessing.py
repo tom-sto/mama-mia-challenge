@@ -122,7 +122,7 @@ def getPatches(segZarrs: list[zarr.Array], dmapZarrs: list[zarr.Array], phaseZar
     dmapImgs    = [np.stack([zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] 
                              for idx in patchIndices]) for zarrArray in dmapZarrs]
     dmapImgs    = torch.from_numpy(np.array(dmapImgs)).to(device, dtype=DTYPE_DMAP, non_blocking=True)
-    phaseImgs   = [np.stack([zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] 
+    phaseImgs   = [np.stack([zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] / np.max(zarrArray)     # normalize to (0,1)
                              for idx in patchIndices]) for zarrArray in phaseZarrs]
     phaseImgs   = torch.from_numpy(np.array(phaseImgs)).to(device, dtype=DTYPE_PHASE, non_blocking=True)
     

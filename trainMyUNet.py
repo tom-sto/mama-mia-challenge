@@ -2,7 +2,6 @@ import torch
 import os
 import matplotlib.pyplot as plt
 import SimpleITK as sitk
-# from transformers import get_cosine_schedule_with_warmup
 from torch.utils.tensorboard import SummaryWriter
 from torchjd.aggregation import UPGrad
 from torchjd import mtl_backward
@@ -474,10 +473,10 @@ if __name__ == "__main__":
     dataDir = rf"{os.environ.get("MAMAMIA_DATA")}/my_preprocessed_data/{datasetName}"
     # pretrainedDecoderPath = "pretrained_weights/nnunet_pretrained_weights_64_best.pth"
     pretrainedDecoderPath = None
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    bottleneck = BOTTLENECK_TRANSFORMERST
-    # bottleneck = BOTTLENECK_CONV
+    # bottleneck = BOTTLENECK_TRANSFORMERST
+    bottleneck = BOTTLENECK_CONV
     skips = True
     joint = False
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
