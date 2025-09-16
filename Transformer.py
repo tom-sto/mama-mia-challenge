@@ -11,7 +11,7 @@ class MyTransformerST(nn.Module):
                  channels,
                  nHeads,
                  nLayers,
-                 patient_data_path=r"F:\MAMA-MIA\clinical_and_imaging_info.xlsx"):
+                 patient_data_path):
         super().__init__()
 
         self.patch_size = patch_size

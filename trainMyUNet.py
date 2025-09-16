@@ -16,7 +16,7 @@ from time import time
 
 class MyTrainer():
     def __init__(self, nEpochs: int, modelName: str = "", tag: str = "", joint: bool = True, test: bool = False,
-                 patientDataPath=r"F:\MAMA-MIA\clinical_and_imaging_info.xlsx"):
+                 patientDataPath="clinical_and_imaging_info.xlsx"):
         self.nEpochs = nEpochs
         self.joint = joint
         self.pretrainSegmentation = self.nEpochs * 0.5
@@ -32,7 +32,7 @@ class MyTrainer():
         self.outputFolder = f"./transformerResults/{modelName}"
         os.makedirs(self.outputFolder, exist_ok=True)
 
-        self.patientDataPath = patientDataPath
+        self.patientDataPath = os.path.join(os.environ.get("MAMAMIA_DATA"), patientDataPath)
 
         self.tag = tag
         self.test = test
@@ -54,6 +54,7 @@ class MyTrainer():
 
         self.model = MyUNet(patchSize,
                             pretrainedDecoderPath=pretrainedDecoderPath,
+                            patientDataPath=self.patientDataPath,
                             nHeads=nHeads,
                             useSkips=useSkips,
                             joint=self.joint,
@@ -470,7 +471,7 @@ if __name__ == "__main__":
     writer = SummaryWriter()
     datasetName = "Dataset106_cropped_Xch_breast_no_norm"
     # dataDir = rf"F:\MAMA-MIA\my_preprocessed_data\{datasetName}"
-    dataDir = rf".\my_preprocessed_data\{datasetName}"
+    dataDir = rf"/mnt/storageSSD/MAMA-MIA/data/my_preprocessed_data/{datasetName}"
     # pretrainedDecoderPath = "pretrained_weights/nnunet_pretrained_weights_64_best.pth"
     pretrainedDecoderPath = None
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")

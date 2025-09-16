@@ -12,6 +12,7 @@ class MyUNet(torch.nn.Module):
                  expectedChannels: list[int] = [1, 32, 64, 128, 256, 320], 
                  expectedStride: list[int] = [2, 2, 2, 2, 2],
                  pretrainedDecoderPath: str = None,
+                 patientDataPath: str = None,
                  nHeads: int = 8,
                  useSkips: bool = True,
                  joint: bool = True,
@@ -33,7 +34,7 @@ class MyUNet(torch.nn.Module):
         self.bottleneckType = bottleneck
         match bottleneck:
             case helpers.BOTTLENECK_TRANSFORMERST:
-                self.bottleneck = MyTransformerST(expectedPatchSize, expectedChannels, nHeads, nBottleneckLayers)
+                self.bottleneck = MyTransformerST(expectedPatchSize, expectedChannels, nHeads, nBottleneckLayers, patientDataPath)
             
             # TODO: Implement PCR with these bottlenecks
             case helpers.BOTTLENECK_CONV:
