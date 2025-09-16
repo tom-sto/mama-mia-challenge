@@ -164,7 +164,7 @@ class MyTrainer():
                     
                     print(f"\t{segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Dice Loss: {diceLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
 
-                del segs, dmaps, phases, pcrs, patchIndices
+                del phases, pcrs, patchIndices
 
                 segLossesThisEpoch.append(segLoss.item())
                 bceLossesThisEpoch.append(bceLoss.item())
@@ -247,7 +247,7 @@ class MyTrainer():
                 target: torch.Tensor    = target[0].to(device, dtype=DTYPE_SEG, non_blocking=True).unsqueeze(1)
                 distMap: torch.Tensor   = distMap[0].to(device, dtype=DTYPE_DMAP, non_blocking=True).unsqueeze(1)
                 phases: torch.Tensor    = phases.to(device, dtype=DTYPE_PHASE, non_blocking=True).unsqueeze(0)
-                patchIndices = torch.tensor(patchIndices).to(self.device)
+                patchIndices            = torch.tensor(patchIndices).to(self.device, non_blocking=True)
 
                 with torch.autocast(self.device.type):
                     segOut, _, pcrOut = self.model(phases, patientIDs, patchIndices)
@@ -259,7 +259,7 @@ class MyTrainer():
                     bceLoss, diceLoss, bdLoss = self.SegLoss(segOut, target, distMap)
                     segLoss: torch.Tensor = bceLoss + diceLoss + bdLoss
 
-                del segs, dmaps, phases, pcrs, patchIndices
+                del phases, pcrs, patchIndices
                 
                 segLossesVal.append(segLoss.item())
                 bceLossesVal.append(bceLoss.item())

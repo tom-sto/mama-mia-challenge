@@ -32,28 +32,6 @@ class PCRLoss(nn.Module):
         return loss
     
 class BoundaryLoss(nn.Module):
-    """
-    A simple implementation of Boundary Loss for binary segmentation.
-
-    This loss function encourages the model to accurately predict the boundaries
-    of objects by penalizing discrepancies between the predicted segmentation
-    and the ground truth signed distance map (SDM).
-
-    The core idea is based on the formulation: L_BD = sum(predicted_probability * ground_truth_SDM)
-    where SDM is negative inside the object, positive outside, and zero at the boundary.
-    Minimizing this sum encourages high probabilities where SDM is negative (inside GT)
-    and low probabilities where SDM is positive (outside GT).
-
-    Args:
-        sigmoid (bool): If True, applies a sigmoid activation to the inputs.
-                        Set to True if your model outputs logits.
-                        Set to False if your model outputs probabilities (0-1).
-        reduction (str): Specifies the reduction to apply to the output:
-                         'mean' | 'sum' | 'none'. Default: 'mean'.
-                         'mean' will average the loss over the batch.
-        class_idx (int, optional): The start index of the foreground class in the target tensor.
-                                   Defaults to 1 (assuming channel 0 is bg, channel 1 is fg).
-    """
     def __init__(self, reduction: str = 'mean', class_idx: int = 1):
         super(BoundaryLoss, self).__init__()
         self.reduction = reduction
@@ -62,20 +40,8 @@ class BoundaryLoss(nn.Module):
         if reduction not in ['mean', 'sum', 'none']:
             raise ValueError(f"Reduction must be 'mean', 'sum', or 'none', but got {reduction}")
 
+    # Assume input shape: (N, C, H, W, D)
     def forward(self, inputs: torch.Tensor, dist_maps: torch.Tensor) -> torch.Tensor:
-        """
-        Calculates the Boundary Loss.
-
-        Args:
-            inputs (torch.Tensor): Activated outputs from the model.
-                                   Shape: (N, C, H, W, D) for 3D or (N, C, H, W) for 2D.
-                                   Expect C = 2 for binary background vs foreground
-            dist_maps (torch.Tensor): Distance maps for ground truth segmentations.
-                                    Shape: (N, C, H, W, D) or (N, C, H, W).
-
-        Returns:
-            torch.Tensor: The calculated Boundary Loss.
-        """
         inputs = inputs[:, self.class_idx:, ...]    # select foreground only
 
         # Calculate the core Boundary Loss term
@@ -90,7 +56,7 @@ class BoundaryLoss(nn.Module):
         else: # 'none'
             return loss
         
-class MyDiceLoss(nn.Module):
+class DiceLoss(nn.Module):
     def __init__(self):
         super().__init__()
 
@@ -117,29 +83,24 @@ class SegLoss(nn.Module):
     def __init__(self, bcePosWeight: float):
         super().__init__()
 
-        # softDiceKWArgs = {'batch_dice': True,      # we will likely use a batch size of 1
-        #                   'do_bg': True,
-        #                   'smooth': 1e-5, 
-        #                   'ddp': False}
         self.DiceWeight = 1
         self.BCEWeight  = 1
         self.BDWeight   = 3e-2
 
-        # self.OldDiceLoss   = MemoryEfficientSoftDiceLoss(**softDiceKWArgs)
-        self.DiceLoss   = MyDiceLoss()
+        self.DiceLoss   = DiceLoss()
         self.BCELoss    = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(bcePosWeight))
         self.BDLoss     = BoundaryLoss(class_idx=0)
 
     # expect x shape: [B, N, 1, X, Y, Z]
-    def forward(self, x: torch.Tensor, target: torch.Tensor, dmaps: torch.Tensor):
-        bceLoss  = self.BCELoss(x, target.float())
+    def forward(self, x: torch.Tensor, target: torch.Tensor, dmaps: torch.Tensor) -> tuple[torch.Tensor]:
+        bceLoss: torch.Tensor   = self.BCELoss(x, target.float())
         
         # now we activate with sigmoid since these losses assume prob input
         x = torch.sigmoid(x)
         
         # oldDiceLoss = self.OldDiceLoss(x, target)
-        diceLoss = self.DiceLoss(x, target)
-        bdLoss   = self.BDLoss(x, dmaps)
+        diceLoss: torch.Tensor  = self.DiceLoss(x, target)
+        bdLoss: torch.Tensor    = self.BDLoss(x, dmaps)
         return bceLoss * self.BCEWeight, diceLoss * self.DiceWeight, (1 + bdLoss) * self.BDWeight
 
 # Assume input and target are same size (X, Y, Z) and the values of each entry are binary.

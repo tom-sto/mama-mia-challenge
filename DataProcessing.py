@@ -132,7 +132,7 @@ def getPatches(segZarrs: list[zarr.Array], dmapZarrs: list[zarr.Array], phaseZar
     dmapVolumes  = [z[...].astype(np.float32) for z in dmapZarrs]
     dmapImgs     = torch.from_numpy(np.stack([extract_patches(vol, patchIndices, patchSize) for vol in dmapVolumes]))
 
-    phaseVolumes = [z[...].astype(np.float32) for z in phaseZarrs]
+    phaseVolumes = [z[...].astype(np.float32) / np.max(z) for z in phaseZarrs]
     phaseImgs    = torch.from_numpy(np.stack([extract_patches(vol, patchIndices, patchSize) for vol in phaseVolumes]))
     # TODO: Finish me!
     pcrValues   = [None]
