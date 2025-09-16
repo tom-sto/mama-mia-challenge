@@ -471,7 +471,7 @@ if __name__ == "__main__":
     writer = SummaryWriter()
     datasetName = "Dataset106_cropped_Xch_breast_no_norm"
     # dataDir = rf"F:\MAMA-MIA\my_preprocessed_data\{datasetName}"
-    dataDir = rf"/mnt/storageSSD/MAMA-MIA/data/my_preprocessed_data/{datasetName}"
+    dataDir = rf"{os.environ.get("MAMAMIA_DATA")}/my_preprocessed_data/{datasetName}"
     # pretrainedDecoderPath = "pretrained_weights/nnunet_pretrained_weights_64_best.pth"
     pretrainedDecoderPath = None
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
