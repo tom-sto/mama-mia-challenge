@@ -1,3 +1,4 @@
 torchjd
 zarr
 pandas
+numba

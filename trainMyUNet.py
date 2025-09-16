@@ -144,13 +144,13 @@ class MyTrainer():
                     patientIDs = [patientIDs]
                 # print(f"thing {idx}, {patientIDs}: {obj.keys()}")
                 
-                segs, dmaps, phases, pcrs, patchIndices = handle()
+                target, distMap, phases, pcrs, patchIndices = handle()
 
                 torch.cuda.empty_cache()
-                pcr: torch.Tensor       = pcrs[0]       # should be singleton tensor
-                target: torch.Tensor    = segs[0].unsqueeze(1)
-                distMap: torch.Tensor   = dmaps[0].unsqueeze(1)
-                phases: torch.Tensor    = phases.unsqueeze(0)
+                pcr: torch.Tensor       = pcrs[0]
+                target: torch.Tensor    = target[0].to(device, dtype=DTYPE_SEG, non_blocking=True).unsqueeze(1)
+                distMap: torch.Tensor   = distMap[0].to(device, dtype=DTYPE_DMAP, non_blocking=True).unsqueeze(1)
+                phases: torch.Tensor    = phases.to(device, dtype=DTYPE_PHASE, non_blocking=True).unsqueeze(0)
                 patchIndices = torch.tensor(patchIndices).to(self.device)
 
                 with torch.autocast(self.device.type):
@@ -240,13 +240,13 @@ class MyTrainer():
                     patientIDs = [patientIDs]
                 # print(f"thing {idx}, {patientIDs}: {obj.keys()}")
                 
-                segs, dmaps, phases, pcrs, patchIndices = handle()
+                target, distMap, phases, pcrs, patchIndices = handle()
 
                 torch.cuda.empty_cache()
-                pcr: torch.Tensor       = pcrs[0]       # should be singleton tensor
-                target: torch.Tensor    = segs[0].unsqueeze(1)
-                distMap: torch.Tensor   = dmaps[0].unsqueeze(1)
-                phases: torch.Tensor    = phases.unsqueeze(0)
+                pcr: torch.Tensor       = pcrs[0]
+                target: torch.Tensor    = target[0].to(device, dtype=DTYPE_SEG, non_blocking=True).unsqueeze(1)
+                distMap: torch.Tensor   = distMap[0].to(device, dtype=DTYPE_DMAP, non_blocking=True).unsqueeze(1)
+                phases: torch.Tensor    = phases.to(device, dtype=DTYPE_PHASE, non_blocking=True).unsqueeze(0)
                 patchIndices = torch.tensor(patchIndices).to(self.device)
 
                 with torch.autocast(self.device.type):

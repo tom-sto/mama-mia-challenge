@@ -6,7 +6,17 @@ import SimpleITK as sitk
 import pandas as pd
 from functools import partial
 from itertools import product
-from helpers import PATCH_SIZE, NUM_PATCHES, DTYPE_SEG, DTYPE_DMAP, DTYPE_PHASE, ACQ_TIME_THRESHOLD
+from helpers import PATCH_SIZE, NUM_PATCHES, ACQ_TIME_THRESHOLD
+from numba import njit
+
+@njit
+def extract_patches(array, patch_indices, patch_size):
+    n_patches = len(patch_indices)
+    patches = np.empty((n_patches, patch_size, patch_size, patch_size), dtype=array.dtype)
+    for i in range(n_patches):
+        x, y, z = patch_indices[i]
+        patches[i] = array[x:x+patch_size, y:y+patch_size, z:z+patch_size]
+    return patches
 
 ''' 
 data {
@@ -115,17 +125,15 @@ def getPatches(segZarrs: list[zarr.Array], dmapZarrs: list[zarr.Array], phaseZar
     patchIndices = getIndices(numPatches, patchSize, shape, 
                               oversample=oversample, fgBox=fgBox, 
                               loadWholeImage=loadWholeImage)
-    
-    segImgs     = [np.stack([zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] 
-                             for idx in patchIndices]) for zarrArray in segZarrs]
-    segImgs     = torch.from_numpy(np.array(segImgs)).to(device, dtype=DTYPE_SEG, non_blocking=True)
-    dmapImgs    = [np.stack([zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] 
-                             for idx in patchIndices]) for zarrArray in dmapZarrs]
-    dmapImgs    = torch.from_numpy(np.array(dmapImgs)).to(device, dtype=DTYPE_DMAP, non_blocking=True)
-    phaseImgs   = [np.stack([zarrArray[idx[0]:idx[0] + patchSize, idx[1]:idx[1] + patchSize, idx[2]:idx[2] + patchSize] / np.max(zarrArray)     # normalize to (0,1)
-                             for idx in patchIndices]) for zarrArray in phaseZarrs]
-    phaseImgs   = torch.from_numpy(np.array(phaseImgs)).to(device, dtype=DTYPE_PHASE, non_blocking=True)
-    
+
+    segVolumes   = [z[...].astype(np.int32) for z in segZarrs]
+    segImgs      = torch.from_numpy(np.stack([extract_patches(vol, patchIndices, patchSize) for vol in segVolumes]))
+
+    dmapVolumes  = [z[...].astype(np.float32) for z in dmapZarrs]
+    dmapImgs     = torch.from_numpy(np.stack([extract_patches(vol, patchIndices, patchSize) for vol in dmapVolumes]))
+
+    phaseVolumes = [z[...].astype(np.float32) for z in phaseZarrs]
+    phaseImgs    = torch.from_numpy(np.stack([extract_patches(vol, patchIndices, patchSize) for vol in phaseVolumes]))
     # TODO: Finish me!
     pcrValues   = [None]
     
