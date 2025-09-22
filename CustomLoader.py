@@ -76,18 +76,23 @@ class CustomBatchSampler(BatchSampler):
 
     def __len__(self):
         total = 0
-        for patients in self.dataSplit.values():
+        for numPhases, patients in self.dataSplit.items():
+            if numPhases == 5 or numPhases == 6:
+                batchSize = max(1, self.batchSize // 2)
+            else:
+                batchSize = self.batchSize
+            
             n = len(patients)
             if self.dropLast:
-                total += n // self.batchSize
+                total += n // batchSize
             else:
-                total += (n + self.batchSize - 1) // self.batchSize
+                total += (n + batchSize - 1) // batchSize
         return total
 
 def collateNothing(x):
     return x
 
-# assume batch size = 0
+# assume batch size = 1
 def collateUnpack(x):
     return x[0]
 
