@@ -1,22 +1,12 @@
 import torch, torch.nn as nn
 from helpers import EPS
-from MAMAMIA.nnUNet.nnunetv2.training.loss.dice import MemoryEfficientSoftDiceLoss
 
 class PCRLoss(nn.Module):
     def __init__(self):
-        """
-        alpha and beta are weighting terms in case you want to combine BCE with another loss
-        for example: total_loss = alpha * BCE + beta * focal or another auxiliary term.
-        """
         super(PCRLoss, self).__init__()
         self.bce = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(2.4))  # this data set sees 70% negative, 30% positive
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor):
-        """
-        Args:
-            logits: (B,) or (B, 1) raw model outputs (before sigmoid)
-            targets: list of ints (0 or 1), or a torch.Tensor of shape (B,)
-        """
         # Convert list to tensor if needed
         if isinstance(targets, list):
             targets = torch.tensor(targets, device=logits.device)

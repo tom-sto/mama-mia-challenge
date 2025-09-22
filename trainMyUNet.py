@@ -63,8 +63,10 @@ class MyTrainer():
                             bottleneck=bottleneck,
                             nBottleneckLayers=4).to(device)
         
+        dataTime = time()
         self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, self.patientDataPath, self.oversampleFG, 
                                                                                  batchSize=self.batchSize, test=self.test)
+        print(f"\tTook {FormatSeconds(time() - dataTime)}")
 
         # change optimizer and scheduler
         self.optimizer = torch.optim.AdamW([
@@ -97,8 +99,8 @@ class MyTrainer():
         # we don't know how much foreground though, since we sample randomly on the bounding box
         # so we guess that around 70% of each oversampled patch is foreground. -> self.oversampleFG * 0.7
         # If we dont oversample, then the average ratio of background to foreground is used
-        # (i don't actually know this number rn, so again just guess that ~5% voxels are foreground)
-        bcePosWeight = 1 / (self.oversampleFG * 0.7) if self.oversampleFG != 0 else 20
+        # (i don't actually know this number rn, so again just guess that ~10% voxels are foreground)
+        bcePosWeight = 1 / (self.oversampleFG * 0.7) - 1 if self.oversampleFG != 0 else 9
         self.SegLoss = SegLoss(bcePosWeight=bcePosWeight)
 
         return self

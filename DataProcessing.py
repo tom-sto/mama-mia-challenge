@@ -61,7 +61,7 @@ def GetData(parentDir: str, patientDataPath: str, oversample: float = 0., test: 
     print("Collecting data...")
 
     # Load patient metadata once
-    df = pd.read_excel(patientDataPath, "dataset_info")
+    df = pd.read_excel(patientDataPath, "dataset_info")[["patient_id", "acquisition_times"]]
     np.random.seed(420)
 
     # Pickle-safe nested defaultdict
@@ -77,9 +77,14 @@ def GetData(parentDir: str, patientDataPath: str, oversample: float = 0., test: 
             patientPaths = [p for p in patientPaths if "nact" in p]
         
         # Iterate through patient images in the directory
+        seenPatients = []
         for img in patientPaths:
             sp = img.split("_")
             patient_id = f"{sp[0]}_{sp[1]}"
+            if patient_id in seenPatients:
+                continue
+            else:
+                seenPatients.append(patient_id)
             
             # Determine the number of phases for the current patient
             acqTimes = df[df["patient_id"] == patient_id.upper()]["acquisition_times"].iloc[0]
@@ -107,6 +112,7 @@ def GetData(parentDir: str, patientDataPath: str, oversample: float = 0., test: 
             # Store data in the structure
             data[trts][nPhases][patient_id] = handle
 
+    print("\tTraining and testing done, getting validation...")
     # Implement 10% split logic for validation
     data["validation"] = defaultdict(dict)
 

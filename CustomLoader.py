@@ -53,10 +53,18 @@ class CustomBatchSampler(BatchSampler):
             if self.shuffle:
                 rng.shuffle(patientIDs)
 
-            for i in range(0, len(patientIDs), self.batchSize):
-                batchPids = patientIDs[i:i + self.batchSize]
+            # I'm gonna cheat a little bit here
+            # When we load images with more phases, we use more data (obviously)
+            # So use smaller batch size with higher phase counts so it fits in VRAM
+            if numPhases == 5 or numPhases == 6:
+                batchSize = max(1, self.batchSize // 2)
+            else:
+                batchSize = self.batchSize
+            
+            for i in range(0, len(patientIDs), batchSize):
+                batchPids = patientIDs[i:i + batchSize]
                 batch = [(pid, numPhases) for pid in batchPids]
-                if self.dropLast and len(batch) < self.batchSize:
+                if self.dropLast and len(batch) < batchSize:
                     continue
                 batches.append(batch)
 
