@@ -141,6 +141,7 @@ class MyTrainer():
             self.model.train()
 
             startEpoch = time()
+            nBatches = len(self.trDataloader)
             for idx, struct in enumerate(self.trDataloader):        # iterate over patient cases
                 handles, patientIDs = zip(*struct)
                 target, distMap, phases, pcrs, patchIndices = runHandles(handles)
@@ -161,7 +162,7 @@ class MyTrainer():
                     bceLoss, diceLoss, bdLoss = self.SegLoss(segOut, target, distMap)
                     segLoss: torch.Tensor = bceLoss + diceLoss + bdLoss
                     
-                    print(f"\t{segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Dice Loss: {diceLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
+                    print(f"\tTraining Batch {idx+1}/{nBatches}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Dice Loss: {diceLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
 
                 del phases, pcrs, patchIndices
 
@@ -232,6 +233,7 @@ class MyTrainer():
             diceVal = []
             self.model.eval()
 
+            nBatches = len(self.vlDataloader)
             for idx, struct in enumerate(self.vlDataloader):        # iterate over patient cases
                 handles, patientIDs = zip(*struct)
                 target, distMap, phases, pcrs, patchIndices = runHandles(handles)
@@ -252,6 +254,8 @@ class MyTrainer():
                     # do one-hot encoding since that makes our loss functions behave better
                     bceLoss, diceLoss, bdLoss = self.SegLoss(segOut, target, distMap)
                     segLoss: torch.Tensor = bceLoss + diceLoss + bdLoss
+
+                print(f"\tValidation Batch {idx+1}/{nBatches}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Dice Loss: {diceLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
 
                 del phases, pcrs, patchIndices
                 
@@ -282,6 +286,7 @@ class MyTrainer():
                 del segOut, pcrOut, target, bceLoss, diceLoss, bdLoss, segLoss, pcrLoss
             
             self.LRScheduler.step()
+            print()
 
             # MODEL CHECKPOINTING
             if self.writer:
@@ -347,17 +352,16 @@ class MyTrainer():
         from MAMAMIA.src.challenge.metrics import hausdorff_distance
         
         print("Running inference!")
-        # TODO: Finish me
         scoreDF = pd.DataFrame(columns=["Patient ID", "Dice", "HD95", "PCR", "PCR Pred"])
         for struct in self.tsDataloader:
             handle, patientID = struct
-            patientID = patientID[0]
             
             segs, _, phases, pcrs, patchIndices = handle()
+            phases = torch.from_numpy(phases)
 
             torch.cuda.empty_cache()
             # pcr: torch.Tensor       = pcrs[0].detach().cpu()       # should be singleton tensor
-            target: torch.Tensor    = segs[0].int().detach().cpu()
+            target: torch.Tensor    = torch.from_numpy(segs).int().detach().cpu()
             phase1: torch.Tensor    = phases[1].float().detach().cpu()
             phases: torch.Tensor    = phases.to(self.device, dtype=DTYPE_PHASE, non_blocking=True).unsqueeze(0)
             patchIndices            = torch.tensor(patchIndices).to(self.device)
@@ -368,10 +372,10 @@ class MyTrainer():
                 for startI in range(0, n, CHUNK_SIZE):
                     stopI = min(startI + CHUNK_SIZE, n)
                     segOut: torch.Tensor = self.model(phases[:, :, startI:stopI], [patientID], patchIndices[startI:stopI])
-                    allOuts.append((segOut > 0).int().detach().cpu())
+                    allOuts.append((segOut > 0).int().detach().cpu().squeeze())
                     del segOut
             
-            segOut = torch.cat(allOuts).squeeze()
+            segOut = torch.cat(allOuts)
 
             dicePatches = Dice(segOut, target)
 
@@ -403,6 +407,8 @@ class MyTrainer():
 
         print(f"Average Dice: {scoreDF["Dice (Full Image)"].mean()}")
         print(f"Average HD95: {scoreDF["HD95"].mean()}")
+
+# TODO: Finish me
         # from score_task1 import doScoring
         # doScoring(os.path.dirname(outputPath))
         
@@ -474,7 +480,7 @@ if __name__ == "__main__":
     joint = False
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=100, modelName=modelName, tag="Batch4", joint=joint, test=test)
+    trainer = MyTrainer(nEpochs=1, modelName=modelName, tag="Batch4", joint=joint, test=test)
     
     trainer.setup(dataDir, 
                   device, 
@@ -483,5 +489,5 @@ if __name__ == "__main__":
                   bottleneck=bottleneck)       
     # trainer.train(continueTraining=True, modelName="LatestFullChannels.pth")
     trainer.train()
-    trainer.inference(f"Latest{trainer.tag}.pth")
-    # trainer.inference(f"BestSeg{trainer.tag}.pth")
+    # trainer.inference(f"Latest{trainer.tag}.pth")
+    trainer.inference(f"BestSeg{trainer.tag}.pth")

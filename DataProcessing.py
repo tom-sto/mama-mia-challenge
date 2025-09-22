@@ -20,7 +20,7 @@ def extractPatches(array, patch_indices, patch_size):
         patches[i] = array[x:x+patch_size, y:y+patch_size, z:z+patch_size]
     return patches
 
-def runHandles(handles, ):
+def runHandles(handles):
     with ThreadPoolExecutor(max_workers=4) as executor:
         results = list(executor.map(lambda h: h(), handles))
 

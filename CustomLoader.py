@@ -76,17 +76,23 @@ class CustomBatchSampler(BatchSampler):
                 total += (n + self.batchSize - 1) // self.batchSize
         return total
 
-def myCollate(x):
-    return x if len(x) > 1 else x[0]
+def collateNothing(x):
+    return x
+
+# assume batch size = 0
+def collateUnpack(x):
+    return x[0]
 
 def GetDataloaders(dataDir: str, patientDataPath: str, oversample: float, 
                    batchSize: int = 1, shuffle=True, test=False):
     data = GetData(dataDir, patientDataPath, oversample, test=test)
 
     def makeLoader(split: str):
+        testing = split=="testing"
         dataset = CustomDataset(data=data[split])
-        sampler = CustomBatchSampler(data[split], batchSize=1 if split=="testing" else batchSize, shuffle=shuffle)
-        return torch.utils.data.DataLoader(dataset, batch_sampler=sampler, collate_fn=myCollate,
+        sampler = CustomBatchSampler(data[split], batchSize=1 if testing else batchSize, shuffle=shuffle)
+        return torch.utils.data.DataLoader(dataset, batch_sampler=sampler, 
+                                           collate_fn=collateUnpack if testing else collateNothing,
                                            num_workers=4, pin_memory=True, persistent_workers=True)
 
     return makeLoader("training"), makeLoader("validation"), makeLoader("testing")
