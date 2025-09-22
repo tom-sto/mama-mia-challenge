@@ -91,29 +91,29 @@ def do_training_case(patient_id, TR_DIR, PP_DIR, LB_DIR):
     outPathSeg = join(PP_DIR, "training", patient_id + "_seg.zarr")
     outPathDmap = join(PP_DIR, "training", patient_id + "_dmap.zarr")
 
-    # for file_path in glob.glob(os.path.join(TR_DIR, patient_id + "*.nii.gz")):
-    #     outPath = join(PP_DIR, "training", file_path.split("\\")[-1][:-7])
-    #     img = sitk.Cast(sitk.ReadImage(file_path), sitk.sitkFloat32)
-    #     resImg = reorient_and_resample(img)
-    #     # paddedImg = pad_to_patch_compatible_size(resImg)
+    for file_path in glob.glob(os.path.join(TR_DIR, patient_id + "*.nii.gz")):
+        outPath = join(PP_DIR, "training", file_path.split("\\")[-1][:-7])
+        img = sitk.Cast(sitk.ReadImage(file_path), sitk.sitkFloat32)
+        resImg = reorient_and_resample(img)
+        # paddedImg = pad_to_patch_compatible_size(resImg)
 
-    #     arr = sitk.GetArrayFromImage(resImg).astype(np.float16)
-    #     save_zarr(outPath + ".zarr", arr)
-    #     # sitk.WriteImage(sitk.GetImageFromArray(arr), outPath + ".nii")
-    # print(f"\tFinished phases for {patient_id}")
+        arr = sitk.GetArrayFromImage(resImg).astype(np.float16)
+        save_zarr(outPath + ".zarr", arr)
+        # sitk.WriteImage(sitk.GetImageFromArray(arr), outPath + ".nii")
+    print(f"\tFinished phases for {patient_id}")
 
-    # segImgPath = join(LB_DIR, patient_id + ".nii.gz")
-    # segImg = sitk.ReadImage(segImgPath)
-    # croppedSeg = crop_to_bounding_box(segImg, patient_id)
-    # resSeg = reorient_and_resample(croppedSeg, interpolator=sitk.sitkNearestNeighbor)
+    segImgPath = join(LB_DIR, patient_id + ".nii.gz")
+    segImg = sitk.ReadImage(segImgPath)
+    croppedSeg = crop_to_bounding_box(segImg, patient_id)
+    resSeg = reorient_and_resample(croppedSeg, interpolator=sitk.sitkNearestNeighbor)
 
-    # seg = sitk.GetArrayFromImage(resSeg).astype(bool)
-    # save_zarr(outPathSeg, seg)
+    seg = sitk.GetArrayFromImage(resSeg).astype(bool)
+    save_zarr(outPathSeg, seg)
 
-    # minFG, maxFG = get_foreground_bbox(seg)
-    # with open(join(PP_DIR, "training", patient_id + "_bbox.txt"), mode="w+") as f:
-    #     f.write(str(minFG) + ", " + str(maxFG))
-    # print(f"\tFinished seg for {patient_id}")
+    minFG, maxFG = get_foreground_bbox(seg)
+    with open(join(PP_DIR, "training", patient_id + "_bbox.txt"), mode="w+") as f:
+        f.write(str(minFG) + ", " + str(maxFG))
+    print(f"\tFinished seg for {patient_id}")
 
     seg = zarr.load(outPathSeg).astype(bool)
     

@@ -47,6 +47,7 @@ class MyUNet(torch.nn.Module):
 
     def forward(self, x: torch.Tensor, patientIDs: list[str], patchIdxs: list[tuple[int]], patientData: list = None):
         x, skips, shape = self.encoder(x)
+        B, N = shape[0], shape[2]
 
         x = self.bottleneck(x, shape, patientIDs, patchIdxs)
         if "seg" not in self.ret or "Transformer" in self.bottleneckType:
@@ -54,6 +55,7 @@ class MyUNet(torch.nn.Module):
             x: torch.Tensor = sharedFeatures
 
         segOut: torch.Tensor = self.decoder(x.reshape(-1, *x.shape[2:]), skips)
+        segOut = segOut.reshape(B, N, *segOut.shape[-3:])
 
         if self.ret == "seg":
             return segOut, None, None

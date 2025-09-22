@@ -9,7 +9,7 @@ from MyUNet import MyUNet
 from Losses import PCRLoss, SegLoss, Dice
 from Schedulers import WarmupCosineAnnealingWithRestarts
 from CustomLoader import GetDataloaders
-from DataProcessing import reconstructImageFromPatches
+from DataProcessing import reconstructImageFromPatches, runHandles
 from helpers import *
 from time import time
 
@@ -18,11 +18,14 @@ class MyTrainer():
                  patientDataPath="clinical_and_imaging_info.xlsx"):
         self.nEpochs = nEpochs
         self.joint = joint
+        
+        # Parameters to change!
         self.pretrainSegmentation = self.nEpochs * 0.5
         self.peakLR = 1e-5
         self.minLR = 1e-10
         self.currentEpoch = 0
         self.oversampleFG = 0.3
+        self.batchSize = 4
 
         self.clsLosses = []
         self.PCRPercentages = []
@@ -60,7 +63,8 @@ class MyTrainer():
                             bottleneck=bottleneck,
                             nBottleneckLayers=4).to(device)
         
-        self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, device, self.patientDataPath, self.oversampleFG, test=self.test)
+        self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, self.patientDataPath, self.oversampleFG, 
+                                                                                 batchSize=self.batchSize, test=self.test)
 
         # change optimizer and scheduler
         self.optimizer = torch.optim.AdamW([
@@ -70,7 +74,7 @@ class MyTrainer():
             {'params': self.model.classifier.parameters(), 'lr': self.minLR * 50,  'weight_decay': 1e-4}
         ])
         # self.optimizer = torch.optim.AdamW(params=self.model.parameters(), lr=self.minLR, weight_decay=1e-4)
-        # use much smaller initial scale since our early losses will be close to 1
+
         self.gradScaler = torch.GradScaler(device.type)
         self.aggregator = UPGrad()
 
@@ -138,20 +142,15 @@ class MyTrainer():
 
             startEpoch = time()
             for idx, struct in enumerate(self.trDataloader):        # iterate over patient cases
-                handle, patientIDs = struct
-
-                if type(patientIDs) == str:
-                    patientIDs = [patientIDs]
-                # print(f"thing {idx}, {patientIDs}: {obj.keys()}")
-                
-                target, distMap, phases, pcrs, patchIndices = handle()
+                handles, patientIDs = zip(*struct)
+                target, distMap, phases, pcrs, patchIndices = runHandles(handles)
 
                 torch.cuda.empty_cache()
-                pcr: torch.Tensor       = pcrs[0]
-                target: torch.Tensor    = target[0].to(device, dtype=DTYPE_SEG, non_blocking=True).unsqueeze(1)
-                distMap: torch.Tensor   = distMap[0].to(device, dtype=DTYPE_DMAP, non_blocking=True).unsqueeze(1)
-                phases: torch.Tensor    = phases.to(device, dtype=DTYPE_PHASE, non_blocking=True).unsqueeze(0)
-                patchIndices = torch.tensor(patchIndices).to(self.device)
+                pcr: torch.Tensor       = pcrs
+                target: torch.Tensor    = torch.from_numpy(target).to(self.device, dtype=DTYPE_SEG, non_blocking=True)
+                distMap: torch.Tensor   = torch.from_numpy(distMap).to(self.device, dtype=DTYPE_DMAP, non_blocking=True)
+                phases: torch.Tensor    = torch.from_numpy(phases).to(self.device, dtype=DTYPE_PHASE, non_blocking=True)
+                patchIndices            = torch.from_numpy(patchIndices).to(self.device)
 
                 with torch.autocast(self.device.type):
                     segOut, sharedFeatures, pcrOut = self.model(phases, patientIDs, patchIndices)
@@ -234,20 +233,15 @@ class MyTrainer():
             self.model.eval()
 
             for idx, struct in enumerate(self.vlDataloader):        # iterate over patient cases
-                handle, patientIDs = struct
-
-                if type(patientIDs) == str:
-                    patientIDs = [patientIDs]
-                # print(f"thing {idx}, {patientIDs}: {obj.keys()}")
-                
-                target, distMap, phases, pcrs, patchIndices = handle()
+                handles, patientIDs = zip(*struct)
+                target, distMap, phases, pcrs, patchIndices = runHandles(handles)
 
                 torch.cuda.empty_cache()
-                pcr: torch.Tensor       = pcrs[0]
-                target: torch.Tensor    = target[0].to(device, dtype=DTYPE_SEG, non_blocking=True).unsqueeze(1)
-                distMap: torch.Tensor   = distMap[0].to(device, dtype=DTYPE_DMAP, non_blocking=True).unsqueeze(1)
-                phases: torch.Tensor    = phases.to(device, dtype=DTYPE_PHASE, non_blocking=True).unsqueeze(0)
-                patchIndices            = torch.tensor(patchIndices).to(self.device, non_blocking=True)
+                pcr: torch.Tensor       = pcrs
+                target: torch.Tensor    = torch.from_numpy(target).to(self.device, dtype=DTYPE_SEG, non_blocking=True)
+                distMap: torch.Tensor   = torch.from_numpy(distMap).to(self.device, dtype=DTYPE_DMAP, non_blocking=True)
+                phases: torch.Tensor    = torch.from_numpy(phases).to(self.device, dtype=DTYPE_PHASE, non_blocking=True)
+                patchIndices            = torch.from_numpy(patchIndices).to(self.device)
 
                 with torch.autocast(self.device.type):
                     segOut, _, pcrOut = self.model(phases, patientIDs, patchIndices)
@@ -357,8 +351,7 @@ class MyTrainer():
         scoreDF = pd.DataFrame(columns=["Patient ID", "Dice", "HD95", "PCR", "PCR Pred"])
         for struct in self.tsDataloader:
             handle, patientID = struct
-
-            # print(f"thing {idx}, {patientIDs}: {obj.keys()}")
+            patientID = patientID[0]
             
             segs, _, phases, pcrs, patchIndices = handle()
 
@@ -366,8 +359,8 @@ class MyTrainer():
             # pcr: torch.Tensor       = pcrs[0].detach().cpu()       # should be singleton tensor
             target: torch.Tensor    = segs[0].int().detach().cpu()
             phase1: torch.Tensor    = phases[1].float().detach().cpu()
-            phases: torch.Tensor    = phases.unsqueeze(0)
-            patchIndices = torch.tensor(patchIndices).to(self.device)
+            phases: torch.Tensor    = phases.to(self.device, dtype=DTYPE_PHASE, non_blocking=True).unsqueeze(0)
+            patchIndices            = torch.tensor(patchIndices).to(self.device)
 
             with torch.autocast(self.device.type):
                 n = len(patchIndices)
@@ -475,13 +468,13 @@ if __name__ == "__main__":
     pretrainedDecoderPath = None
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    # bottleneck = BOTTLENECK_TRANSFORMERST
-    bottleneck = BOTTLENECK_CONV
+    bottleneck = BOTTLENECK_TRANSFORMERST
+    # bottleneck = BOTTLENECK_CONV
     skips = True
     joint = False
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=100, modelName=modelName, tag="FixedLosses", joint=joint, test=test)
+    trainer = MyTrainer(nEpochs=100, modelName=modelName, tag="Batch4", joint=joint, test=test)
     
     trainer.setup(dataDir, 
                   device, 

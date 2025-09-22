@@ -86,8 +86,9 @@ class MyTransformerST(nn.Module):
             concat: torch.Tensor = self.patientDataEmbed(concat)                # [1, npatientDataOutFeatures]
             patientDataEmb[idx] = concat.expand(N*X*Y*Z, T, -1)                 # [B, N*X*Y*Z, T, npatientDataOutFeatures]
 
-            acq_times = md["acquisition_times"][:T]
+            acq_times = md["acquisition_times"]
             if acq_times is not None:
+                acq_times = acq_times[:T]
                 assert len(acq_times) == T, f"Expected acquisition times to match num phases: {T}, got {len(acq_times)}"
                 acqTimes[idx] = torch.tensor(acq_times).expand(N*X*Y*Z, -1)
 
@@ -123,7 +124,6 @@ class MyTransformerST(nn.Module):
         # reshape to match conv shape
         x = x[:, 1:].reshape(B, N, X, Y, Z, E)
         x = x.permute(0, 1, 5, 2, 3, 4)         # (B, N, E, X, Y, Z)
-        # features = unpatchTensor(x, self.num_patches)       # [B, E, P, P, P]
 
         return x, cls_token
 

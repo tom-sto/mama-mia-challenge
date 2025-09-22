@@ -1,5 +1,6 @@
 import torch
 import pandas as pd
+import numba
 
 IMAGE_TYPES = ("phase", "seg", "dmap")
 PATCH_SIZE  = 32
@@ -7,6 +8,7 @@ CHUNK_SIZE  = 64
 NUM_PATCHES = 64
 
 ACQ_TIME_THRESHOLD = 750
+MIN_NUM_PHASES = 3
 
 DTYPE_SEG   = torch.bool
 DTYPE_DMAP  = torch.float16

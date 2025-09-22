@@ -1,7 +1,7 @@
 import random
 import torch
 from DataProcessing import GetData
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset, Sampler, BatchSampler
 
 # need this to load and track training data along with dmap vectors
 # group tensors by patient ID 
@@ -12,8 +12,8 @@ class CustomDataset(Dataset):
         self.data = data
 
     def __getitem__(self, ind: str):
-        patientID = ind
-        handle = self.data[patientID]
+        patientID, numPhases = ind
+        handle = self.data[numPhases][patientID]
                         
         return handle, patientID
     
@@ -34,30 +34,59 @@ class CustomSampler(Sampler):
 
     def __len__(self):
         return len(self.indices)
+    
+class CustomBatchSampler(BatchSampler):
+    def __init__(self, dataSplit: dict, batchSize: int, shuffle: bool = False, dropLast: bool = False, seed=None):
+        self.dataSplit = dataSplit
+        self.batchSize = batchSize
+        self.shuffle = shuffle
+        self.dropLast = dropLast
+        self.seed = seed
 
-def my_collate(x):
-    return x[0]
+    def __iter__(self):
+        rng = random.Random(self.seed)
+        batches = []
 
-# TODO: Make batch sampler that takes patients with matching # phases
-def GetDataloaders(dataDir: str, device: torch.device, patientDataPath: str, oversample: float, 
+        for numPhases, patients in self.dataSplit.items():
+            patientIDs = list(patients.keys())
+
+            if self.shuffle:
+                rng.shuffle(patientIDs)
+
+            for i in range(0, len(patientIDs), self.batchSize):
+                batchPids = patientIDs[i:i + self.batchSize]
+                batch = [(pid, numPhases) for pid in batchPids]
+                if self.dropLast and len(batch) < self.batchSize:
+                    continue
+                batches.append(batch)
+
+        if self.shuffle:
+            rng.shuffle(batches)
+
+        for batch in batches:
+            yield batch
+
+    def __len__(self):
+        total = 0
+        for patients in self.dataSplit.values():
+            n = len(patients)
+            if self.dropLast:
+                total += n // self.batchSize
+            else:
+                total += (n + self.batchSize - 1) // self.batchSize
+        return total
+
+def myCollate(x):
+    return x if len(x) > 1 else x[0]
+
+def GetDataloaders(dataDir: str, patientDataPath: str, oversample: float, 
                    batchSize: int = 1, shuffle=True, test=False):
-    data = GetData(dataDir, device, patientDataPath, oversample, test=test)
-    trDataset = CustomDataset(data=data["training"])
-    trPIDs = list(data["training"].keys())
-    trSampler = CustomSampler(trPIDs, shuffle=shuffle)
-    trDataloader = torch.utils.data.DataLoader(trDataset, batch_size=batchSize, sampler=trSampler, collate_fn=my_collate,
-                                               num_workers=4, pin_memory=True, persistent_workers=True)
-    
-    vlDataset = CustomDataset(data=data["validation"])
-    vlPIDs = list(data["validation"].keys())
-    vlSampler = CustomSampler(vlPIDs, shuffle=shuffle)
-    vlDataloader = torch.utils.data.DataLoader(vlDataset, batch_size=batchSize, sampler=vlSampler, collate_fn=my_collate,
-                                               num_workers=4, pin_memory=True, persistent_workers=True)
-    
-    tsDataset = CustomDataset(data=data["testing"])
-    tsPIDs = list(data["testing"].keys())
-    tsSampler = CustomSampler(tsPIDs, shuffle=shuffle)
-    tsDataloader = torch.utils.data.DataLoader(tsDataset, batch_size=batchSize, sampler=tsSampler, collate_fn=my_collate,
-                                               num_workers=4, pin_memory=True, persistent_workers=True)
-    
-    return trDataloader, vlDataloader, tsDataloader
+    data = GetData(dataDir, patientDataPath, oversample, test=test)
+
+    def makeLoader(split: str):
+        dataset = CustomDataset(data=data[split])
+        sampler = CustomBatchSampler(data[split], batchSize=1 if split=="testing" else batchSize, shuffle=shuffle)
+        return torch.utils.data.DataLoader(dataset, batch_sampler=sampler, collate_fn=myCollate,
+                                           num_workers=4, pin_memory=True, persistent_workers=True)
+
+    return makeLoader("training"), makeLoader("validation"), makeLoader("testing")

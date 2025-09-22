@@ -6,11 +6,13 @@ import SimpleITK as sitk
 import pandas as pd
 from functools import partial
 from itertools import product
-from helpers import PATCH_SIZE, NUM_PATCHES, ACQ_TIME_THRESHOLD
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from helpers import PATCH_SIZE, NUM_PATCHES, ACQ_TIME_THRESHOLD, MIN_NUM_PHASES
 from numba import njit
 
 @njit
-def extract_patches(array, patch_indices, patch_size):
+def extractPatches(array, patch_indices, patch_size):
     n_patches = len(patch_indices)
     patches = np.empty((n_patches, patch_size, patch_size, patch_size), dtype=array.dtype)
     for i in range(n_patches):
@@ -18,124 +20,158 @@ def extract_patches(array, patch_indices, patch_size):
         patches[i] = array[x:x+patch_size, y:y+patch_size, z:z+patch_size]
     return patches
 
+def runHandles(handles, ):
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda h: h(), handles))
+
+    # results = [h() for h in handles]
+
+    targets, distMaps, phases, pcrs, patchIndices = zip(*results)
+    return np.stack(targets), np.stack(distMaps), np.stack(phases), np.stack(pcrs), np.stack(patchIndices)
+
 ''' 
 data {
-    tr/val/ts: {                 ("training", "validation", "testing")
-        patient_id:         e.g. ("duke_002", "ispy2_981664")
-            handle - partial that returns
-                - [segImg tensor]       (should be 1)
-                - [dmapImg tensor]      (should be 1)
-                - [phaseImg tensor]     (should be 2-5)
-                - [patchIndices]
+    tr/val/ts: {                    ("training", "validation", "testing")
+        num_phases: {
+            patient_id: {           e.g. ("duke_002", "ispy2_981664")
+                handle - partial that returns
+                - segImg tensors
+                    [NUM_PATCHES x PATCH_SIZE x PATCH_SIZE x PATCH_SIZE]
+                - dmapImg tensors
+                    [NUM_PATCHES x PATCH_SIZE x PATCH_SIZE x PATCH_SIZE]
+                - phaseImg tensors
+                    [num_phases x NUM_PATCHES x PATCH_SIZE x PATCH_SIZE x PATCH_SIZE]
+                - pcr tensors
+                    [singleton]
+                - patchIndices
+                    (list of 3-tuples)
+            }
+        }
     }
 }
 '''
-def GetData(parentDir: str, device: torch.device, patientDataPath: str, oversample: float = 0., test: bool = False, ):
-    print("Collecting data...")
-    # assume this dir is my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm
-    data = {}
-    
-    df = pd.read_excel(patientDataPath, "dataset_info")
+# Initialize the data structure
+def defaultPhaseDict():
+    return defaultdict(dict)
 
+def defaultSplitDict():
+    return defaultdict(defaultPhaseDict)
+
+def GetData(parentDir: str, patientDataPath: str, oversample: float = 0., test: bool = False):
+    print("Collecting data...")
+
+    # Load patient metadata once
+    df = pd.read_excel(patientDataPath, "dataset_info")
     np.random.seed(420)
 
-    pids = {}
+    # Pickle-safe nested defaultdict
+    data = defaultdict(defaultSplitDict)
+
+    # Iterate through directories and organize the data
     for trts in os.listdir(parentDir):
         trtsDir = os.path.join(parentDir, trts)
         if not os.path.isdir(trtsDir):
             continue
-        pids[trts] = set()
-        for img in os.listdir(trtsDir):
+        patientPaths = os.listdir(trtsDir)
+        if test:
+            patientPaths = [p for p in patientPaths if "nact" in p]
+        
+        # Iterate through patient images in the directory
+        for img in patientPaths:
             sp = img.split("_")
-            patient_id = sp[0] + "_" + sp[1]
-            pids[trts].add(patient_id)
+            patient_id = f"{sp[0]}_{sp[1]}"
+            
+            # Determine the number of phases for the current patient
+            acqTimes = df[df["patient_id"] == patient_id.upper()]["acquisition_times"].iloc[0]
+            if not pd.isna(acqTimes):
+                acqTimes = eval(acqTimes)
+                nPhases = max(MIN_NUM_PHASES, sum([int(x <= ACQ_TIME_THRESHOLD) for x in acqTimes]))  # Calculate phases
+            else:
+                nPhases = MIN_NUM_PHASES
 
-    if test:
-        pids["training"] = ["duke_612", "duke_778", "ispy2_255078", "ispy2_410083"]
-        pids["testing"] = ["duke_385"]
-    
-    for trts in pids.keys():
-        data[trts] = {}
-        ids = pids[trts]
-        trtsDir = os.path.join(parentDir, trts)
-        for pid in ids:
-            imgs = glob.glob(os.path.join(trtsDir, f"{pid}*.zarr"))
-            bboxPath = os.path.join(trtsDir, f"{pid}_bbox.txt")
+            # Get phase files for the patient
+            phases = sorted(glob.glob(os.path.join(trtsDir, f"{patient_id}_0*.zarr")))[:nPhases]
+            dmap = os.path.join(trtsDir, f"{patient_id}_dmap.zarr")
+            seg = os.path.join(trtsDir, f"{patient_id}_seg.zarr")
+            bboxPath = os.path.join(trtsDir, f"{patient_id}_bbox.txt")
+            
+            # Read bounding box
             with open(bboxPath, 'r') as f:
                 bbox = eval(f.read().strip())
-            
-            handle = loadImagePatches(imgs, device, PATCH_SIZE, NUM_PATCHES, df,
-                                       oversample=oversample, fgBox=bbox,
-                                       loadWholeImage=(trts=="testing"))
-            data[trts][pid] = handle
-    
-    data["validation"] = {}
-    trainingKeys = list(data["training"].keys())
-    for patient_id in trainingKeys:
-        if np.random.random() > 0.9:        # move 10% of training cases to validation
-            data["validation"][patient_id] = data["training"][patient_id]
-            del data["training"][patient_id]
 
-    if test:
-        data["validation"] = {}
-        data["validation"]["duke_612"] = data["training"]["duke_612"]
-        del data["training"]["duke_612"]
+            # Load the image patches
+            handle = loadImagePatches(phases, dmap, seg, PATCH_SIZE, NUM_PATCHES,
+                                      oversample=oversample, fgBox=bbox, 
+                                      loadWholeImage=(trts == "testing"))
 
-    print(f"Got data: train is {len(data['training'])}, val is {len(data['validation'])}, test is {len(data['testing'])}")
+            # Store data in the structure
+            data[trts][nPhases][patient_id] = handle
 
-    return data
+    # Implement 10% split logic for validation
+    data["validation"] = defaultdict(dict)
+
+    # For each num_phases group
+    for num_phases in list(data["training"].keys()):
+        patient_dict = data["training"][num_phases]
+        patient_ids = list(patient_dict.keys())
+
+        for patient_id in patient_ids:
+            if np.random.random() < 0.1:  # 10% chance
+                # Move patient to validation
+                data["validation"][num_phases][patient_id] = patient_dict[patient_id]
+                del data["training"][num_phases][patient_id]
+
+        # If a num_phases group ends up empty in training, remove it
+        if not data["training"][num_phases]:
+            del data["training"][num_phases]
+
+    def countPatients(split_data: dict) -> int:
+        return sum(len(patients) for patients in split_data.values())
+
+    print(f"Got data: train = {countPatients(data['training'])}, "
+          f"val = {countPatients(data['validation'])}, "
+          f"test = {countPatients(data['testing'])}")
+
+    return dict(data)  # Convert defaultdict to regular dict for return
+
 
 # i feel very clever for this approach ;)
 # Store partial handles in a data structure
 # and then run them only when I need them (making sure to delete the arrays after to save memory)
 # return segImg handles, dmapImg handles, [phaseImg handles for p in nPhases] 
-def loadImagePatches(paths: list[str], device: torch.device, patchSize: int, 
-                     numPatches: int, patientDF: pd.DataFrame, oversample: float, 
+def loadImagePatches(phasePaths: list[str], dmapPath: str, segPath: str, patchSize: int, 
+                     numPatches: int, oversample: float, 
                      fgBox: tuple[list[int]], loadWholeImage: bool = False):
-    assert all(path.endswith('.zarr') for path in paths), "Only .zarr files are supported."
+    assert all(path.endswith('.zarr') for path in [segPath] + [dmapPath] + phasePaths), "Only .zarr files are supported."
 
-    segPaths    = [p for p in paths if "seg" in p]
-    dmapPaths   = [p for p in paths if "dmap" in p]
-    phasePaths  = [p for p in paths if "seg" not in p and "dmap" not in p]
-    
-    # need images in ascending order!
-    segPaths.sort()
-    dmapPaths.sort()
-    phasePaths.sort()
+    segZarr     = zarr.open(segPath, mode='r')
+    dmapZarr    = zarr.open(dmapPath, mode='r') if os.path.exists(dmapPath) else None
+    phaseZarrs  = [zarr.open(p, mode='r') for p in phasePaths]
 
-    patientPath = os.path.basename(phasePaths[0])
-    patientID: str = patientPath[:-10].upper()
-    acqTimes = patientDF[patientDF["patient_id"] == patientID]["acquisition_times"].iloc[0]
-    if not pd.isna(acqTimes):
-        acqTimes = eval(acqTimes)
-        nPhases = max(2, sum([int(x <= ACQ_TIME_THRESHOLD) for x in acqTimes]))
-        phasePaths = phasePaths[:nPhases]
-
-    segZarrs = [zarr.open(p, mode='r') for p in segPaths]
-    dmapZarrs = [zarr.open(p, mode='r') for p in dmapPaths]
-    phaseZarrs = [zarr.open(p, mode='r') for p in phasePaths]
-
-    return partial(getPatches, segZarrs, dmapZarrs, phaseZarrs, device, patchSize, numPatches, oversample, fgBox, loadWholeImage)
+    return partial(getPatches, phaseZarrs, dmapZarr, segZarr, patchSize, numPatches, oversample, fgBox, loadWholeImage)
 
 # need to select patch indices inside of function handle since we want it to be consistent for all images in a case,
 # but it should pick different patches each iteration
-def getPatches(segZarrs: list[zarr.Array], dmapZarrs: list[zarr.Array], phaseZarrs: list[zarr.Array], device: torch.device, patchSize: int,
+def getPatches(phaseZarrs: list[zarr.Array], dmapZarr: zarr.Array, segZarr: zarr.Array, patchSize: int,
                numPatches: int, oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool):
-    shape = segZarrs[0].shape
+    shape = segZarr.shape
     patchIndices = getIndices(numPatches, patchSize, shape, 
                               oversample=oversample, fgBox=fgBox, 
                               loadWholeImage=loadWholeImage)
 
-    segVolumes   = [z[...].astype(np.int32) for z in segZarrs]
-    segImgs      = torch.from_numpy(np.stack([extract_patches(vol, patchIndices, patchSize) for vol in segVolumes]))
+    segImgs      = extractPatches(segZarr[...].astype(np.int32), patchIndices, patchSize)
 
-    dmapVolumes  = [z[...].astype(np.float32) for z in dmapZarrs]
-    dmapImgs     = torch.from_numpy(np.stack([extract_patches(vol, patchIndices, patchSize) for vol in dmapVolumes]))
-
+    # This one allowed to be None because don't need it for testing, and might not need it if no Boundary Loss
+    if dmapZarr:
+        dmapImgs = extractPatches(dmapZarr[...].astype(np.int32), patchIndices, patchSize)
+    else:
+        dmapImgs = None
+    
     phaseVolumes = [z[...].astype(np.float32) / np.max(z) for z in phaseZarrs]
-    phaseImgs    = torch.from_numpy(np.stack([extract_patches(vol, patchIndices, patchSize) for vol in phaseVolumes]))
+    phaseImgs    = np.stack([extractPatches(vol, patchIndices, patchSize) for vol in phaseVolumes])
+    
     # TODO: Finish me!
-    pcrValues   = [None]
+    pcrValues    = None
     
     return segImgs, dmapImgs, phaseImgs, pcrValues, patchIndices
 
@@ -231,25 +267,6 @@ def subpatchTensor(x: torch.Tensor, subpatchSize: int):
 
     numSubpatches = (X // subpatchSize) * (Y // subpatchSize) * (Z // subpatchSize)
     return x, numSubpatches
-
-# this function undoes subpatching, returning a tensor to its original size
-# (B*N, C, P, P, P) -> (B, C, X, Y, Z)
-# X == Y == Z
-# N == numSubpatches
-def unpatchTensor(x: torch.Tensor, numSubpatches: int):
-    assert len(x.shape) == 5, f"Expected shape (B*N, C, P, P, P). Got {x.shape}"
-    B_N, C, P, _, _ = x.shape
-    numSubpatchesPerDim = round(numSubpatches ** (1/3))
-    X = Y = Z = P * numSubpatchesPerDim
-
-    B = B_N // numSubpatches
-
-    # Reshape back to original dimensions
-    x = x.view(B, numSubpatchesPerDim, numSubpatchesPerDim, numSubpatchesPerDim, C, P, P, P)
-    x = x.permute(0, 4, 1, 5, 2, 6, 3, 7)  # [B, C, X//P, P, Y//P, P, Z//P, P]
-    x = x.reshape(B, C, X, Y, Z)  # [B, C, X, Y, Z]
-
-    return x
 
 def GetBinaryArrayFromTrainingTensor(tensor: torch.Tensor):
     maxIndices = torch.argmax(tensor, dim=2, keepdim=True)
