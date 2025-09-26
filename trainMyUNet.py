@@ -422,9 +422,9 @@ class MyTrainer():
         print()
         scoreDF.to_csv(os.path.join(self.outputFolder, resultsFolder, "scores.csv"), index=False)
 
-        print(f"Average Dice: {scoreDF["Dice (Full Image)"].mean()} +/- {scoreDF["Dice (Full Image)"].std()}")
-        print(f"Average Dice (Over Patches): {scoreDF["Dice (Avg Over Patches)"].mean()} +/- {scoreDF["Dice (Avg Over Patches)"].std()}")
-        print(f"Average HD95: {scoreDF["HD95"].mean()} +/- {scoreDF["HD95"].std()}")
+        print(f"Average Dice: {scoreDF["Dice (Full Image)"].mean():.4f} +/- {scoreDF["Dice (Full Image)"].std():.4f}")
+        print(f"Average Dice (Over Patches): {scoreDF["Dice (Avg Over Patches)"].mean():.4f} +/- {scoreDF["Dice (Avg Over Patches)"].std():.4f}")
+        print(f"Average HD95: {scoreDF["HD95"].mean():.4f} +/- {scoreDF["HD95"].std():.4f}")
 
 # TODO: Finish me
         # from score_task1 import doScoring
@@ -498,12 +498,12 @@ if __name__ == "__main__":
     joint = False
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=100, modelName=modelName, tag="Batch4", joint=joint, test=test)
+    trainer = MyTrainer(nEpochs=100, modelName=modelName, tag="Batch4GroupNorm", joint=joint, test=test)
     
     trainer.setup(dataDir, 
                   device, 
                   pretrainedDecoderPath=pretrainedDecoderPath, 
-                  useSkips=True, 
+                  useSkips=skips, 
                   bottleneck=bottleneck)
     trainer.train()
     # trainer.inference(f"Latest{trainer.tag}.pth", "Latest")
