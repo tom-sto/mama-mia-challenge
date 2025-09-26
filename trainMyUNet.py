@@ -303,8 +303,8 @@ class MyTrainer():
                 avgDiceVal = Mean(diceVal)
                 self.writer.add_scalar('Dice/Validation', avgDiceVal, self.currentEpoch)
 
-                if avgSegValLoss < bestSeg:
-                    bestSeg = avgSegValLoss
+                if avgDiceVal < bestSeg:
+                    bestSeg = avgDiceVal
                     print(f"Saving Best Seg: epoch {self.currentEpoch}")
                     self.saveModel(f"BestSeg{self.tag}")
                 
@@ -331,11 +331,13 @@ class MyTrainer():
             print(f"\tFull loop took {FormatSeconds(time() - startEpoch)}")
         # print(patchIdxs)
 
+        self.saveModel()
         print("Done training!")
         print(f"\tTook {FormatSeconds(time() - start)}.")
         return
 
-    def inference(self, stateDictPath: str, outputPath: str = "predSegmentationsCropped", outputPathPCR: str = "predPCR"):
+    def inference(self, stateDictPath: str, resultsTag: str,
+                  outputPath: str = "predSegmentationsCropped", outputPathPCR: str = "predPCR"):
         stateDictPath = os.path.join(self.outputFolder, stateDictPath)
         stateDict = torch.load(stateDictPath, map_location=self.device, weights_only=False)
         modelState = stateDict['networkWeights']
@@ -345,8 +347,9 @@ class MyTrainer():
         self.model.eval()
         self.model.ret = "segOnly"
 
-        outputPath = os.path.join(self.outputFolder, f"outputs{self.tag}", outputPath)
-        outputPathPCR = os.path.join(self.outputFolder, f"outputs{self.tag}", outputPathPCR)
+        resultsFolder = f"outputs{self.tag}{resultsTag}"
+        outputPath = os.path.join(self.outputFolder, resultsFolder, outputPath)
+        outputPathPCR = os.path.join(self.outputFolder, resultsFolder, outputPathPCR)
         os.makedirs(outputPath, exist_ok=True)
         os.makedirs(outputPathPCR, exist_ok=True)
 
@@ -354,61 +357,74 @@ class MyTrainer():
         from MAMAMIA.src.challenge.metrics import hausdorff_distance
         
         print("Running inference!")
-        scoreDF = pd.DataFrame(columns=["Patient ID", "Dice", "HD95", "PCR", "PCR Pred"])
+        scoreDF = None
         for struct in self.tsDataloader:
-            handle, patientID = struct
+            # handle, patientID = struct
             
-            segs, _, phases, pcrs, patchIndices = handle()
-            phases = torch.from_numpy(phases)
+            # segs, _, phases, pcrs, patchIndices = handle()
+            # phases = torch.from_numpy(phases)
+
+            # torch.cuda.empty_cache()
+            # # pcr: torch.Tensor       = pcrs[0].detach().cpu()       # should be singleton tensor
+            # target: torch.Tensor    = torch.from_numpy(segs).int().detach().cpu()
+            # phase1: torch.Tensor    = phases[1].float().detach().cpu()
+            # phases: torch.Tensor    = phases.to(self.device, dtype=DTYPE_PHASE, non_blocking=True).unsqueeze(0)
+            # patchIndices            = torch.tensor(patchIndices).to(self.device)
+
+            handles, patientIDs = zip(*struct)
+            target, _, phases, pcrs, patchIndices = runHandles(handles)
 
             torch.cuda.empty_cache()
-            # pcr: torch.Tensor       = pcrs[0].detach().cpu()       # should be singleton tensor
-            target: torch.Tensor    = torch.from_numpy(segs).int().detach().cpu()
-            phase1: torch.Tensor    = phases[1].float().detach().cpu()
-            phases: torch.Tensor    = phases.to(self.device, dtype=DTYPE_PHASE, non_blocking=True).unsqueeze(0)
-            patchIndices            = torch.tensor(patchIndices).to(self.device)
+            target: torch.Tensor    = torch.from_numpy(target).int().detach().cpu()
+            phases: torch.Tensor    = torch.from_numpy(phases).to(self.device, dtype=DTYPE_PHASE, non_blocking=True)
+            phase1: torch.Tensor    = phases[:, 1].float().detach().cpu()
+            patchIndices            = torch.from_numpy(patchIndices).to(self.device)
 
             with torch.autocast(self.device.type):
-                n = len(patchIndices)
+                n = patchIndices.shape[1]
                 allOuts = []
                 for startI in range(0, n, CHUNK_SIZE):
                     stopI = min(startI + CHUNK_SIZE, n)
-                    segOut: torch.Tensor = self.model(phases[:, :, startI:stopI], [patientID], patchIndices[startI:stopI])
-                    allOuts.append((segOut > 0).int().detach().cpu().squeeze())
+                    segOut: torch.Tensor = self.model(phases[:, :, startI:stopI], patientIDs, patchIndices[:, startI:stopI])
+                    allOuts.append((segOut > 0).int().detach().cpu())
                     del segOut
             
-            segOut = torch.cat(allOuts)
-
-            dicePatches = Dice(segOut, target)
+            segOut = torch.cat(allOuts, dim=1)
 
             patchIndices = patchIndices.detach().cpu()
-            phaseImageArr = reconstructImageFromPatches([phase1], [patchIndices], PATCH_SIZE)
-            segImageArr = reconstructImageFromPatches([segOut], [patchIndices], PATCH_SIZE)
-            targetImageArr = reconstructImageFromPatches([target], [patchIndices], PATCH_SIZE)
-            
-            dice = Dice(segImageArr, targetImageArr)
+            for i, patientID in enumerate(patientIDs):
+                dicePatches = Dice(segOut[i], target[i])
+                phaseImageArr = reconstructImageFromPatches(phase1[i], patchIndices[i], PATCH_SIZE)
+                segImageArr = reconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE)
+                targetImageArr = reconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE)
+                
+                dice = Dice(segImageArr, targetImageArr)
 
-            segImageArr = segImageArr.numpy()
-            targetImageArr = targetImageArr.numpy()
+                segImageArr = segImageArr.numpy()
+                targetImageArr = targetImageArr.numpy()
 
-            hausdorff = hausdorff_distance(targetImageArr, segImageArr)
-            
-            row = pd.DataFrame({"Patient ID": [patientID], "Dice (Full Image)": [dice], "Dice (Avg Over Patches)": [dicePatches],"HD95": [hausdorff]})
-            scoreDF = pd.concat([scoreDF, row])
+                hausdorff = hausdorff_distance(targetImageArr, segImageArr)
+                
+                row = pd.DataFrame({"Patient ID": [patientID], "Dice (Full Image)": [dice], "Dice (Avg Over Patches)": [dicePatches],"HD95": [hausdorff]})
+                if scoreDF is not None:
+                    scoreDF = pd.concat([scoreDF, row])
+                else:
+                    scoreDF = row
 
-            sitk.WriteImage(sitk.GetImageFromArray(segImageArr), 
-                            os.path.join(outputPath, f"{patientID}_pred.nii"))
-            sitk.WriteImage(sitk.GetImageFromArray(targetImageArr), 
-                            os.path.join(outputPath, f"{patientID}.nii"))
-            sitk.WriteImage(sitk.GetImageFromArray(phaseImageArr),
-                            os.path.join(outputPath, f"{patientID}_phase.nii"))
-            
-            print(f"Finished patient {patientID}:\tDice {dice:.4f}\tHausdorff 95 {hausdorff:.4f}")
+                sitk.WriteImage(sitk.GetImageFromArray(segImageArr), 
+                                os.path.join(outputPath, f"{patientID}_pred.nii"))
+                sitk.WriteImage(sitk.GetImageFromArray(targetImageArr), 
+                                os.path.join(outputPath, f"{patientID}.nii"))
+                sitk.WriteImage(sitk.GetImageFromArray(phaseImageArr.numpy()),
+                                os.path.join(outputPath, f"{patientID}_phase.nii"))
+                
+                print(f"Finished patient {patientID}:\tDice {dice:.4f}\tHausdorff 95 {hausdorff:.4f}")
         print()
-        scoreDF.to_csv(os.path.join(self.outputFolder, f"outputs{self.tag}", "scores.csv"))
+        scoreDF.to_csv(os.path.join(self.outputFolder, resultsFolder, "scores.csv"), index=False)
 
-        print(f"Average Dice: {scoreDF["Dice (Full Image)"].mean()}")
-        print(f"Average HD95: {scoreDF["HD95"].mean()}")
+        print(f"Average Dice: {scoreDF["Dice (Full Image)"].mean()} +/- {scoreDF["Dice (Full Image)"].std()}")
+        print(f"Average Dice (Over Patches): {scoreDF["Dice (Avg Over Patches)"].mean()} +/- {scoreDF["Dice (Avg Over Patches)"].std()}")
+        print(f"Average HD95: {scoreDF["HD95"].mean()} +/- {scoreDF["HD95"].std()}")
 
 # TODO: Finish me
         # from score_task1 import doScoring
@@ -481,15 +497,14 @@ if __name__ == "__main__":
     skips = True
     joint = False
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
-    modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=1, modelName=modelName, tag="Batch4", joint=joint, test=test)
+    modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
+    trainer = MyTrainer(nEpochs=100, modelName=modelName, tag="Batch4", joint=joint, test=test)
     
     trainer.setup(dataDir, 
                   device, 
                   pretrainedDecoderPath=pretrainedDecoderPath, 
                   useSkips=True, 
-                  bottleneck=bottleneck)       
-    # trainer.train(continueTraining=True, modelName="LatestFullChannels.pth")
+                  bottleneck=bottleneck)
     trainer.train()
-    # trainer.inference(f"Latest{trainer.tag}.pth")
-    trainer.inference(f"BestSeg{trainer.tag}.pth")
+    # trainer.inference(f"Latest{trainer.tag}.pth", "Latest")
+    trainer.inference(f"BestSeg{trainer.tag}.pth", "BestSeg")

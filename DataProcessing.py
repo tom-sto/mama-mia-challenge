@@ -108,6 +108,7 @@ def GetData(parentDir: str, patientDataPath: str, oversample: float = 0., test: 
             handle = loadImagePatches(phases, dmap, seg, PATCH_SIZE, NUM_PATCHES,
                                       oversample=oversample, fgBox=bbox, 
                                       loadWholeImage=(trts == "testing"))
+                                    #   loadWholeImage=False)
 
             # Store data in the structure
             data[trts][nPhases][patient_id] = handle
@@ -231,9 +232,9 @@ def getFullImageIndices(imageShape, patchSize, minOverlap):
 
     return xIndices, yIndices, zIndices
 
-def reconstructImageFromPatches(patches: list[torch.Tensor], patchCoords: list[torch.Tensor], patchSize: int):
+def reconstructImageFromPatches(patches: torch.Tensor, patchCoords: torch.Tensor, patchSize: int):
     # Determine the target dimensions from the maximum coordinates in patchCoords
-    max_coords = torch.max(torch.cat(patchCoords), dim=0).values
+    max_coords = torch.max(patchCoords, dim=0).values
     target_dims = max_coords + patchSize
     target_dims = target_dims.tolist()
 
@@ -241,20 +242,19 @@ def reconstructImageFromPatches(patches: list[torch.Tensor], patchCoords: list[t
     reconstructed_image: torch.Tensor = torch.zeros(target_dims, device=patches[0].device, dtype=float)
     weight_map: torch.Tensor = torch.zeros(target_dims, device=patches[0].device, dtype=float)
 
-    for chunk, coords in zip(patches, patchCoords):
-        for patch, coord in zip(chunk, coords):
-            # Calculate the slice indices for the patch
-            d_start, h_start, w_start = coord
-            d_end, h_end, w_end = coord + patchSize
+    for patch, coord in zip(patches, patchCoords):
+        # Calculate the slice indices for the patch
+        d_start, h_start, w_start = coord
+        d_end, h_end, w_end = coord + patchSize
 
-            # Add the patch to the reconstructed image and update the weight map
-            reconstructed_image[d_start:d_end, h_start:h_end, w_start:w_end] += patch.float()
-            weight_map[d_start:d_end, h_start:h_end, w_start:w_end] += 1.
+        # Add the patch to the reconstructed image and update the weight map
+        reconstructed_image[d_start:d_end, h_start:h_end, w_start:w_end] += patch.float()
+        weight_map[d_start:d_end, h_start:h_end, w_start:w_end] += 1.
 
     # Normalize the reconstructed image by the weight map to handle overlaps
     reconstructed_image /= torch.clamp(weight_map, min=1)
 
-    return reconstructed_image.to(chunk.dtype)
+    return reconstructed_image.to(patches.dtype)
 
 def subpatchTensor(x: torch.Tensor, subpatchSize: int):
     assert len(x.shape) == 5, f"Expected shape (B, C, X, Y, Z). Got: {x.shape}"

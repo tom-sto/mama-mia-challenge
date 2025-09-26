@@ -6,7 +6,7 @@ def init_weights_conv(module):
         nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
         if module.bias is not None:
             nn.init.constant_(module.bias, 0)
-    elif isinstance(module, nn.BatchNorm3d):
+    elif isinstance(module, nn.GroupNorm):
         nn.init.constant_(module.weight, 1)
         nn.init.constant_(module.bias, 0)
 
@@ -20,11 +20,10 @@ class PatchEncoder(nn.Module):
         self.useSkips = useSkips
 
         # use the same encoder block design as my autoencoder! that worked pretty well!
-        # we can use batch norm even if the batch size is 1 because we artifically inflate it with the patches
         for i in range(numBlocks):
             encBlock = nn.Sequential(
                 nn.Dropout3d(dropout) if i == numBlocks - 1 else nn.Identity(),
-                nn.BatchNorm3d(channels[i]) if i != 0 else nn.Identity(),
+                nn.GroupNorm(num_groups=1, num_channels=channels[i]) if i != 0 else nn.Identity(),
                 nn.Conv3d(channels[i], channels[i], kernel_size=3, padding=1) if i == 0 or i == 1 else nn.Identity(),
                 nn.Conv3d(channels[i], channels[i + 1], kernel_size=3, padding=1),
                 nn.ReLU(True),
@@ -78,14 +77,14 @@ class PatchDecoder(nn.Module):
                 decBlock = nn.Sequential(
                     nn.ConvTranspose3d(2*channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
                     nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
-                    nn.BatchNorm3d(channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
+                    nn.GroupNorm(num_groups=1, num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
                     nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
                 )
             else:
                 decBlock = nn.Sequential(
                     nn.ConvTranspose3d(channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
                     nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
-                    nn.BatchNorm3d(channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
+                    nn.GroupNorm(num_groups=1, num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
                     nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
                 )
 
