@@ -21,7 +21,7 @@ class MyUNet(torch.nn.Module):
         super().__init__()
         
         self.encoder = PatchEncoder(expectedChannels, expectedStride, useSkips=useSkips)
-        self.decoder = PatchDecoder(expectedChannels, useSkips)
+        self.decoder = PatchDecoder(expectedChannels, useSkips=useSkips)
         self.poolSkips = AttentionPooling(expectedChannels[-1], nHeads)
         
         if pretrainedDecoderPath is not None:

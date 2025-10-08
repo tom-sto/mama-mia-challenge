@@ -8,15 +8,16 @@ from functools import partial
 from itertools import product
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from helpers import PATCH_SIZE, NUM_PATCHES, ACQ_TIME_THRESHOLD, MIN_NUM_PHASES
-from numba import njit
+from helpers import PATCH_SIZE, NUM_PATCHES, ACQ_TIME_THRESHOLD, MIN_NUM_PHASES, DTYPE_DMAP, DTYPE_SEG, DTYPE_PHASE
+from Augmenter import GetNoTransforms, GetTrainingTransforms, DoTransforms
 
-@njit
-def extractPatches(array, patch_indices, patch_size):
+@torch.jit.script
+def extractPatches(array: torch.Tensor, patch_indices: list[list[int]], patch_size: int):
     n_patches = len(patch_indices)
-    patches = np.empty((n_patches, patch_size, patch_size, patch_size), dtype=array.dtype)
+    patches = torch.empty((n_patches, patch_size, patch_size, patch_size), dtype=array.dtype)
     for i in range(n_patches):
-        x, y, z = patch_indices[i]
+        idx: list[int] = patch_indices[i]
+        x, y, z = idx
         patches[i] = array[x:x+patch_size, y:y+patch_size, z:z+patch_size]
     return patches
 
@@ -24,17 +25,15 @@ def runHandles(handles):
     with ThreadPoolExecutor(max_workers=4) as executor:
         results = list(executor.map(lambda h: h(), handles))
 
-    # results = [h() for h in handles]
-
     targets, distMaps, phases, pcrs, patchIndices = zip(*results)
-    return np.stack(targets), np.stack(distMaps), np.stack(phases), np.stack(pcrs), np.stack(patchIndices)
+    return torch.stack(targets), torch.stack(distMaps), torch.stack(phases), torch.stack(pcrs), torch.stack(patchIndices)
 
 ''' 
 data {
     tr/val/ts: {                    ("training", "validation", "testing")
         num_phases: {
-            patient_id: {           e.g. ("duke_002", "ispy2_981664")
-                handle - partial that returns
+            patient_id:            e.g. ("duke_002", "ispy2_981664")
+                handle (or [handles]) - partial that returns
                 - segImg tensors
                     [NUM_PATCHES x PATCH_SIZE x PATCH_SIZE x PATCH_SIZE]
                 - dmapImg tensors
@@ -45,7 +44,6 @@ data {
                     [singleton]
                 - patchIndices
                     (list of 3-tuples)
-            }
         }
     }
 }
@@ -57,12 +55,16 @@ def defaultPhaseDict():
 def defaultSplitDict():
     return defaultdict(defaultPhaseDict)
 
-def GetData(parentDir: str, patientDataPath: str, oversample: float = 0., test: bool = False):
+def GetData(parentDir: str, patientDataPath: str, test: bool = False, oversample: float = 0.,
+            oversampleRadius: float = 0.25):
     print("Collecting data...")
 
     # Load patient metadata once
     df = pd.read_excel(patientDataPath, "dataset_info")[["patient_id", "acquisition_times"]]
-    np.random.seed(420)
+    np.random.seed(42)
+
+    trainingCompose = GetTrainingTransforms()
+    valTestCompose = GetNoTransforms()
 
     # Pickle-safe nested defaultdict
     data = defaultdict(defaultSplitDict)
@@ -98,39 +100,36 @@ def GetData(parentDir: str, patientDataPath: str, oversample: float = 0., test: 
             phases = sorted(glob.glob(os.path.join(trtsDir, f"{patient_id}_0*.zarr")))[:nPhases]
             dmap = os.path.join(trtsDir, f"{patient_id}_dmap.zarr")
             seg = os.path.join(trtsDir, f"{patient_id}_seg.zarr")
-            bboxPath = os.path.join(trtsDir, f"{patient_id}_bbox.txt")
+
+            segZarr     = zarr.open(seg, mode='r')
+            dmapZarr    = zarr.open(dmap, mode='r') if os.path.exists(dmap) else None
+            phaseZarrs  = [zarr.open(p, mode='r') for p in phases]
             
+            bboxPath = os.path.join(trtsDir, f"{patient_id}_bbox.txt")
             # Read bounding box
             with open(bboxPath, 'r') as f:
                 bbox = eval(f.read().strip())
 
-            # Load the image patches
-            handle = loadImagePatches(phases, dmap, seg, PATCH_SIZE, NUM_PATCHES,
-                                      oversample=oversample, fgBox=bbox, 
-                                      loadWholeImage=(trts == "testing"))
-                                    #   loadWholeImage=False)
+            # Load the image patches - I feel very clever for this approach ;)
+            # Store partial function handles in a data structure
+            # and then run them only when I need them (making sure to delete the arrays after to save memory)
+            # return segImg handles, dmapImg handles, [phaseImg handles for p in nPhases] 
+            if trts == "training" and np.random.random() < 0.9:
+                handle1 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, oversample, bbox, False, oversampleRadius, trainingCompose)
+                handle2 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, oversample, bbox, False, oversampleRadius, trainingCompose)
+                handle3 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, -1, bbox, False, oversampleRadius, trainingCompose)
+                handle4 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, -1, bbox, False, oversampleRadius, trainingCompose)
+                
+                handles = [handle1, handle2, handle3, handle4]
 
-            # Store data in the structure
-            data[trts][nPhases][patient_id] = handle
-
-    print("\tTraining and testing done, getting validation...")
-    # Implement 10% split logic for validation
-    data["validation"] = defaultdict(dict)
-
-    # For each num_phases group
-    for num_phases in list(data["training"].keys()):
-        patient_dict = data["training"][num_phases]
-        patient_ids = list(patient_dict.keys())
-
-        for patient_id in patient_ids:
-            if np.random.random() < 0.1:  # 10% chance
-                # Move patient to validation
-                data["validation"][num_phases][patient_id] = patient_dict[patient_id]
-                del data["training"][num_phases][patient_id]
-
-        # If a num_phases group ends up empty in training, remove it
-        if not data["training"][num_phases]:
-            del data["training"][num_phases]
+                # Store data in the structure
+                data[trts][nPhases][patient_id] = handles
+            elif trts == "training":
+                data["validation"][nPhases][patient_id] = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, 
+                                                                  0, bbox, True, oversampleRadius, valTestCompose)
+            else:
+                data[trts][nPhases][patient_id] = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, 
+                                                          0, bbox, True, oversampleRadius, valTestCompose)
 
     def countPatients(split_data: dict) -> int:
         return sum(len(patients) for patients in split_data.values())
@@ -141,69 +140,85 @@ def GetData(parentDir: str, patientDataPath: str, oversample: float = 0., test: 
 
     return dict(data)  # Convert defaultdict to regular dict for return
 
-
-# i feel very clever for this approach ;)
-# Store partial handles in a data structure
-# and then run them only when I need them (making sure to delete the arrays after to save memory)
-# return segImg handles, dmapImg handles, [phaseImg handles for p in nPhases] 
-def loadImagePatches(phasePaths: list[str], dmapPath: str, segPath: str, patchSize: int, 
-                     numPatches: int, oversample: float, 
-                     fgBox: tuple[list[int]], loadWholeImage: bool = False):
-    assert all(path.endswith('.zarr') for path in [segPath] + [dmapPath] + phasePaths), "Only .zarr files are supported."
-
-    segZarr     = zarr.open(segPath, mode='r')
-    dmapZarr    = zarr.open(dmapPath, mode='r') if os.path.exists(dmapPath) else None
-    phaseZarrs  = [zarr.open(p, mode='r') for p in phasePaths]
-
-    return partial(getPatches, phaseZarrs, dmapZarr, segZarr, patchSize, numPatches, oversample, fgBox, loadWholeImage)
-
 # need to select patch indices inside of function handle since we want it to be consistent for all images in a case,
 # but it should pick different patches each iteration
-def getPatches(phaseZarrs: list[zarr.Array], dmapZarr: zarr.Array, segZarr: zarr.Array, patchSize: int,
-               numPatches: int, oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool):
+def GetPatches(phaseZarrs: list[zarr.Array], dmapZarr: zarr.Array, segZarr: zarr.Array, patchSize: int,
+               numPatches: int, oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool,
+               oversampleRadius: float, augmentationCompose):
     shape = segZarr.shape
     patchIndices = getIndices(numPatches, patchSize, shape, 
                               oversample=oversample, fgBox=fgBox, 
-                              loadWholeImage=loadWholeImage)
+                              loadWholeImage=loadWholeImage,
+                              oversampleRadius=oversampleRadius)
 
-    segImgs      = extractPatches(segZarr[...].astype(np.int32), patchIndices, patchSize)
+    segArr  = torch.from_numpy(segZarr[...]).to(DTYPE_SEG)
+    dmapArr = torch.from_numpy(dmapZarr[...]).to(DTYPE_DMAP) if dmapZarr is not None else None
+    phaseArrs = [torch.from_numpy(vol[...].astype(np.float32) / np.max(vol)).to(DTYPE_PHASE) for vol in phaseZarrs]
+
+    phaseArrs, segArr, dmapArr = DoTransforms(phaseArrs, segArr, dmapArr, augmentationCompose)
+
+    segImgs = extractPatches(segArr, patchIndices, patchSize)
 
     # This one allowed to be None because don't need it for testing, and might not need it if no Boundary Loss
-    if dmapZarr:
-        dmapImgs = extractPatches(dmapZarr[...].astype(np.int32), patchIndices, patchSize)
+    if dmapArr is not None:
+        dmapImgs = extractPatches(dmapArr, patchIndices, patchSize)
     else:
         dmapImgs = None
     
-    phaseVolumes = [z[...].astype(np.float32) / np.max(z) for z in phaseZarrs]
-    phaseImgs    = np.stack([extractPatches(vol, patchIndices, patchSize) for vol in phaseVolumes])
+    phaseImgs = torch.stack([extractPatches(vol, patchIndices, patchSize) for vol in phaseArrs])
     
     # TODO: Finish me!
-    pcrValues    = None
+    pcrValues = torch.tensor([0])
     
-    return segImgs, dmapImgs, phaseImgs, pcrValues, patchIndices
+    return segImgs, dmapImgs, phaseImgs, pcrValues, torch.tensor(patchIndices).int()
 
 # randomly sample N patches
-def getIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool = False):
+def getIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool,
+               shuffleFullImageIndices: bool = True, oversampleRadius: float = 0.25):
     if loadWholeImage:
         pX, pY, pZ = getFullImageIndices(imgShape, patchSize, minOverlap=patchSize // 4)
-        return list(product(pX, pY, pZ))
+        indices = list(product(pX, pY, pZ))
+        indices = [list(c) for c in indices]
+        if shuffleFullImageIndices:
+            np.random.shuffle(indices)
+        return indices
     
     maxXYZ = [c - patchSize for c in imgShape]
     minFG, maxFG = fgBox
     indices = []
+    oversampleThreshold = np.clip(np.random.normal(oversample, oversampleRadius), 0, 1)
     for _ in range(numPatches):
-        if np.random.rand() < oversample:
+        # make sure that our patches are sampled so that they all DO NOT contain tumor foreground
+        if oversample == -1:
+            # Build valid ranges in each dimension, excluding the foreground region
+            validX = list(range(0, max(minFG[0] - patchSize + 1, 1))) + \
+                     list(range(min(maxFG[0], maxXYZ[0] - 1), maxXYZ[0]))
+            validY = list(range(0, max(minFG[1] - patchSize + 1, 1))) + \
+                     list(range(min(maxFG[1], maxXYZ[1] - 1), maxXYZ[1]))
+            validZ = list(range(0, max(minFG[2] - patchSize + 1, 1))) + \
+                     list(range(min(maxFG[2], maxXYZ[2] - 1), maxXYZ[2]))
+
+            # If no valid range in any dimension, fall back to full random sampling
+            if not validX or not validY or not validZ:
+                start = [np.random.choice(range(maxXYZ[0])),
+                         np.random.choice(range(maxXYZ[1])),
+                         np.random.choice(range(maxXYZ[2]))]
+            else:
+                start = [np.random.choice(validX),
+                         np.random.choice(validY),
+                         np.random.choice(validZ)]
+        elif np.random.rand() < oversampleThreshold:
             # sample the start index from foreground box, but make sure we don't go out of bounds
             r1 = range(max(minFG[0] - patchSize // 2, 0), min(maxFG[0] - patchSize // 2, maxXYZ[0]))
             r2 = range(max(minFG[1] - patchSize // 2, 0), min(maxFG[1] - patchSize // 2, maxXYZ[1]))
             r3 = range(max(minFG[2] - patchSize // 2, 0), min(maxFG[2] - patchSize // 2, maxXYZ[2]))
-            start = (np.random.choice(r1),
+            start = [np.random.choice(r1),
                      np.random.choice(r2),
-                     np.random.choice(r3))
+                     np.random.choice(r3)]
         else:
-            start = (np.random.choice(range(maxXYZ[0])),
+            start = [np.random.choice(range(maxXYZ[0])),
                      np.random.choice(range(maxXYZ[1])),
-                     np.random.choice(range(maxXYZ[2])))
+                     np.random.choice(range(maxXYZ[2]))]
         indices.append(start)
     return indices
 

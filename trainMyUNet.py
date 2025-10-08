@@ -6,7 +6,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchjd.aggregation import UPGrad
 from torchjd import mtl_backward
 from MyUNet import MyUNet
-from Losses import PCRLoss, SegLoss, Dice
+from Losses import PCRLoss, SegLoss, Dice, tp_fp_tn_fn
 from Schedulers import WarmupCosineAnnealingWithRestarts
 from CustomLoader import GetDataloaders
 from DataProcessing import reconstructImageFromPatches, runHandles
@@ -21,10 +21,11 @@ class MyTrainer():
         
         # Parameters to change!
         self.pretrainSegmentation = self.nEpochs * 0.5
-        self.peakLR = 1e-5
-        self.minLR = 1e-10
+        self.peakLR = 2e-5
+        self.minLR = 1e-8
         self.currentEpoch = 0
         self.oversampleFG = 0.3
+        self.oversampleRadius = 0.25
         self.batchSize = 4
 
         self.clsLosses = []
@@ -52,9 +53,10 @@ class MyTrainer():
 
         self.device = device
         nHeads = 8
-        patchSize = 32
 
-        self.model = MyUNet(patchSize,
+        self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
+                            expectedChannels=[1, 64, 128, 256, 320, 400],
+                            expectedStride=[2, 2, 2, 2, 2],
                             pretrainedDecoderPath=pretrainedDecoderPath,
                             patientDataPath=self.patientDataPath,
                             nHeads=nHeads,
@@ -65,7 +67,7 @@ class MyTrainer():
         
         dataTime = time()
         self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, self.patientDataPath, self.oversampleFG, 
-                                                                                 batchSize=self.batchSize, test=self.test)
+                                                                                 self.oversampleRadius, batchSize=self.batchSize, test=self.test)
         print(f"\tTook {FormatSeconds(time() - dataTime)}")
 
         # change optimizer and scheduler
@@ -80,8 +82,8 @@ class MyTrainer():
         self.gradScaler = torch.GradScaler(device.type)
         self.aggregator = UPGrad()
 
-        nWarmupSteps = round(0.2 * self.nEpochs)  # 20% warmup
-        nCycleSteps = round(0.4 * self.nEpochs) + 1   # do 2 cycles
+        nWarmupSteps = round(0.05 * self.nEpochs)  # 5% warmup
+        nCycleSteps = round(0.475 * self.nEpochs) + 1   # do 2 cycles
 
         self.LRScheduler = WarmupCosineAnnealingWithRestarts(
             self.optimizer,
@@ -97,23 +99,25 @@ class MyTrainer():
         # bce pos_weight should be close to the ratio of background to foreground in segmentations
         # since we oversample, we know some percentage of patches will have foreground
         # we don't know how much foreground though, since we sample randomly on the bounding box
-        # so we guess that around 70% of each oversampled patch is foreground. -> self.oversampleFG * 0.7
+        # so we guess that around 20% of each oversampled patch is foreground. -> self.oversampleFG * 0.2
+        #       (From looking at samples in the debugger, 20% is not a bad guess)
         # If we dont oversample, then the average ratio of background to foreground is used
         # (i don't actually know this number rn, so again just guess that ~10% voxels are foreground)
-        bcePosWeight = 1 / (self.oversampleFG * 0.7) - 1 if self.oversampleFG != 0 else 9
+        # So otherwise, posWeight = 90% / 10% = 9
+        bcePosWeight = 1 / (self.oversampleFG * 0.2) - 1 if self.oversampleFG != 0 else 9
         self.SegLoss = SegLoss(bcePosWeight=bcePosWeight)
 
         return self
 
-    def train(self, continueTraining: bool = False, modelName: str = None):
+    def train(self, continueTraining: bool = False, modelName: str = None, shuffleHandles: bool = True):
         if continueTraining:
             assert modelName is not None, "Cannot continue training if no model state is given."
             self.loadModel(modelName)
             print(f"Continuing training from epoch {self.currentEpoch}")
-            self.nEpochs = self.currentEpoch + 1
-
+            self.nEpochs = max(self.currentEpoch + 1, self.nEpochs)
+        
         startEpoch = self.currentEpoch
-        bestSeg = 10.
+        bestSeg = 0.
         bestPCR = 10.
         bestJoint = 10.
 
@@ -145,64 +149,76 @@ class MyTrainer():
             startEpoch = time()
             nBatches = len(self.trDataloader)
             for idx, struct in enumerate(self.trDataloader):        # iterate over patient cases
-                handles, patientIDs = zip(*struct)
-                target, distMap, phases, pcrs, patchIndices = runHandles(handles)
+                patientHandles, patientIDs = zip(*struct)
+                if shuffleHandles:
+                    patientHandles = list(patientHandles)
+                    for i in range(len(patientHandles)):
+                        rd.shuffle(patientHandles[i])
+                handles = list(zip(*patientHandles))
+                nHandles = len(handles)
+                for i in range(nHandles):
+                    target, distMap, phases, pcrs, patchIndices = runHandles(handles[i])
 
-                torch.cuda.empty_cache()
-                pcr: torch.Tensor       = pcrs
-                target: torch.Tensor    = torch.from_numpy(target).to(self.device, dtype=DTYPE_SEG, non_blocking=True)
-                distMap: torch.Tensor   = torch.from_numpy(distMap).to(self.device, dtype=DTYPE_DMAP, non_blocking=True)
-                phases: torch.Tensor    = torch.from_numpy(phases).to(self.device, dtype=DTYPE_PHASE, non_blocking=True)
-                patchIndices            = torch.from_numpy(patchIndices).to(self.device)
+                    torch.cuda.empty_cache()
+                    pcr: torch.Tensor       = pcrs
+                    target: torch.Tensor    = target.to(self.device, non_blocking=True)
+                    distMap: torch.Tensor   = distMap.to(self.device, non_blocking=True)
+                    phases: torch.Tensor    = phases.to(self.device, non_blocking=True)
+                    patchIndices            = patchIndices.to(self.device)
 
-                with torch.autocast(self.device.type):
-                    segOut, sharedFeatures, pcrOut = self.model(phases, patientIDs, patchIndices)
-                    pcrLoss = None
-                    if self.currentEpoch > self.pretrainSegmentation and pcrOut and self.joint:
-                        pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
+                    with torch.autocast(self.device.type):
+                        segOut, sharedFeatures, pcrOut = self.model(phases, patientIDs, patchIndices)
+                        pcrLoss = None
+                        if self.currentEpoch > self.pretrainSegmentation and pcrOut and self.joint:
+                            pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
 
-                    bceLoss, diceLoss, bdLoss = self.SegLoss(segOut, target, distMap)
-                    segLoss: torch.Tensor = bceLoss + diceLoss + bdLoss
+                        bceLoss, diceLoss, bdLoss = self.SegLoss(segOut, target, distMap)
+                        segLoss: torch.Tensor = bceLoss + bdLoss
+
+                        # Dice loss bad on foreground channels when we only background
+                        # So ignore it for these batches
+                        if target.sum().item() > 0:
+                            segLoss += diceLoss
+                            diceLossesThisEpoch.append(diceLoss.item())
+
+                        print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Dice Loss: {diceLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
+
+                    del phases, pcrs, patchIndices
+
+                    segLossesThisEpoch.append(segLoss.item())
+                    bceLossesThisEpoch.append(bceLoss.item())
+                    bdLossesThisEpoch.append(bdLoss.item())
                     
-                    print(f"\tTraining Batch {idx+1}/{nBatches}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Dice Loss: {diceLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
+                    # now only do foreground for "real" Dice score
+                    segOut: torch.Tensor = (segOut > 0).int()
+                    dice = Dice(segOut.detach().cpu(), target.detach().cpu())
+                    diceThisEpoch.append(dice)
 
-                del phases, pcrs, patchIndices
-
-                segLossesThisEpoch.append(segLoss.item())
-                bceLossesThisEpoch.append(bceLoss.item())
-                diceLossesThisEpoch.append(diceLoss.item())
-                bdLossesThisEpoch.append(bdLoss.item())
-                
-                # now only do foreground for "real" Dice score
-                segOut: torch.Tensor = (segOut > 0).int()
-                dice = Dice(segOut.detach().cpu(), target.detach().cpu())
-                diceThisEpoch.append(dice)
-
-                # free as much space as possible before backward()
-                del segOut, pcrOut, target, distMap, bceLoss, diceLoss, bdLoss
-                
-                self.optimizer.zero_grad()
-                if self.joint and pcrLoss:
-                    assert sharedFeatures is not None, "Cannot do joint backward without shared features!"
-                    pcrLossesThisEpoch.append(pcrLoss.item())
-
-                    losses = self.gradScaler.scale([segLoss, pcrLoss])
-                    # losses = [segLoss, pcrLoss]
-                    mtl_backward(losses=losses, 
-                                 features=sharedFeatures, 
-                                 aggregator=self.aggregator,
-                                 tasks_params=[list(self.model.decoder.parameters()), 
-                                               list(self.model.classifier.parameters())],
-                                 shared_params=list(self.model.encoder.parameters()) + list(self.model.bottleneck.parameters()))
-                else:
-                    scaledLoss = self.gradScaler.scale(segLoss)
-                    scaledLoss.backward()
-                    # segLoss.backward()
+                    # free as much space as possible before backward()
+                    del segOut, pcrOut, target, distMap, bceLoss, diceLoss, bdLoss
                     
-                self.gradScaler.step(self.optimizer)
-                self.gradScaler.update()
+                    self.optimizer.zero_grad()
+                    if self.joint and pcrLoss:
+                        assert sharedFeatures is not None, "Cannot do joint backward without shared features!"
+                        pcrLossesThisEpoch.append(pcrLoss.item())
 
-                del segLoss, pcrLoss, sharedFeatures
+                        losses = self.gradScaler.scale([segLoss, pcrLoss])
+                        # losses = [segLoss, pcrLoss]
+                        mtl_backward(losses=losses, 
+                                    features=sharedFeatures, 
+                                    aggregator=self.aggregator,
+                                    tasks_params=[list(self.model.decoder.parameters()), 
+                                                list(self.model.classifier.parameters())],
+                                    shared_params=list(self.model.encoder.parameters()) + list(self.model.bottleneck.parameters()))
+                    else:
+                        scaledLoss = self.gradScaler.scale(segLoss)
+                        scaledLoss.backward()
+                        # segLoss.backward()
+                        
+                    self.gradScaler.step(self.optimizer)
+                    self.gradScaler.update()
+
+                    del segLoss, pcrLoss, sharedFeatures
 
             print()
             if self.writer:
@@ -232,7 +248,10 @@ class MyTrainer():
             bceLossesVal = []
             bdLossesVal = []
             pcrLossesVal = []
-            diceVal = []
+            diceValFull = []
+            diceValPatches = []
+            sensVal = []
+            specVal = []
             self.model.eval()
 
             nBatches = len(self.vlDataloader)
@@ -241,35 +260,61 @@ class MyTrainer():
                 target, distMap, phases, pcrs, patchIndices = runHandles(handles)
 
                 torch.cuda.empty_cache()
-                pcr: torch.Tensor       = pcrs
-                target: torch.Tensor    = torch.from_numpy(target).to(self.device, dtype=DTYPE_SEG, non_blocking=True)
-                distMap: torch.Tensor   = torch.from_numpy(distMap).to(self.device, dtype=DTYPE_DMAP, non_blocking=True)
-                phases: torch.Tensor    = torch.from_numpy(phases).to(self.device, dtype=DTYPE_PHASE, non_blocking=True)
-                patchIndices            = torch.from_numpy(patchIndices).to(self.device)
+                target: torch.Tensor    = target.int()
+                distMap: torch.Tensor   = distMap.to(dtype=DTYPE_DMAP, non_blocking=True)
+                phases: torch.Tensor    = phases.to(self.device, dtype=DTYPE_PHASE, non_blocking=True)
+                patchIndices            = patchIndices.to(self.device)
 
                 with torch.autocast(self.device.type):
-                    segOut, _, pcrOut = self.model(phases, patientIDs, patchIndices)
-                    pcrLoss = None
-                    if self.currentEpoch > self.pretrainSegmentation and pcrOut and self.joint:
-                        pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
+                    n = patchIndices.shape[1]
+                    allOuts = []
+                    for startI in range(0, n, CHUNK_SIZE):
+                        stopI = min(startI + CHUNK_SIZE, n)
+                        segOut, _, pcrOut = self.model(phases[:, :, startI:stopI], patientIDs, patchIndices[:, startI:stopI])
+                        pcrLoss = None
 
-                    # do one-hot encoding since that makes our loss functions behave better
+                        allOuts.append(segOut.detach().cpu())
+                        # TODO: Figure this out later
+                        # if self.currentEpoch > self.pretrainSegmentation and pcrOut and self.joint:
+                        #     pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
+
+                        del segOut
+                
+                    segOut = torch.cat(allOuts, dim=1)
                     bceLoss, diceLoss, bdLoss = self.SegLoss(segOut, target, distMap)
                     segLoss: torch.Tensor = bceLoss + diceLoss + bdLoss
 
+                patchIndices = patchIndices.detach().cpu()
+
                 print(f"\tValidation Batch {idx+1}/{nBatches}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Dice Loss: {diceLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
 
-                del phases, pcrs, patchIndices
+                del phases, pcrs
                 
                 segLossesVal.append(segLoss.item())
                 bceLossesVal.append(bceLoss.item())
                 diceLossesVal.append(diceLoss.item())
                 bdLossesVal.append(bdLoss.item())
                 
-                # now only do foreground for "real" Dice score
-                segOut: torch.Tensor = (segOut > 0).int()
-                dice = Dice(segOut.detach().cpu(), target.detach().cpu())
-                diceVal.append(dice)
+                segOut: torch.Tensor = (segOut > 0).int().detach().cpu()
+                target = target.detach().cpu()
+                dicePatches = []
+                diceFull = []
+                sens = []
+                spec = []
+                for i in range(len(patientIDs)):
+                    dicePatches.append(Dice(segOut[i], target[i]))
+                    segImageArr = reconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE)
+                    targetImageArr = reconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE)
+                    
+                    diceFull.append(Dice(segImageArr, targetImageArr))
+                    tp, fp, tn, fn = tp_fp_tn_fn(segImageArr, targetImageArr)
+                    sens.append(tp / (tp + fn))
+                    spec.append(tn / (tn + fp))
+
+                diceValFull.append(Mean(diceFull))
+                diceValPatches.append(Mean(dicePatches))
+                sensVal.append(Mean(sens))
+                specVal.append(Mean(spec))
 
                 if self.joint and pcrLoss:
                     pcrLossesVal.append(pcrLoss.item())
@@ -285,7 +330,7 @@ class MyTrainer():
                 # specificity = tn_pcr / (tn_pcr + fp_pcr) if (tn_pcr + fp_pcr).item() > 0 else torch.tensor(0.)
                 # balanced_accuracy = (sensitivity + specificity) / 2
 
-                del segOut, pcrOut, target, bceLoss, diceLoss, bdLoss, segLoss, pcrLoss
+                del segOut, pcrOut, target, patchIndices, bceLoss, diceLoss, bdLoss, segLoss, pcrLoss
             
             self.LRScheduler.step()
             print()
@@ -300,10 +345,14 @@ class MyTrainer():
                 self.writer.add_scalar('BCE Loss/Validation', Mean(bceLossesVal), self.currentEpoch)
                 self.writer.add_scalar('Boundary Loss/Validation', Mean(bdLossesVal), self.currentEpoch)
 
-                avgDiceVal = Mean(diceVal)
-                self.writer.add_scalar('Dice/Validation', avgDiceVal, self.currentEpoch)
+                avgDiceVal = Mean(diceValFull)
+                self.writer.add_scalar('Dice/Validation - Full', avgDiceVal, self.currentEpoch)
+                self.writer.add_scalar('Dice/Validation - Patches', Mean(diceValPatches), self.currentEpoch)
 
-                if avgDiceVal < bestSeg:
+                self.writer.add_scalar('Sensitivity - Val', Mean(sensVal), self.currentEpoch)
+                self.writer.add_scalar('Specificity - Val', Mean(specVal), self.currentEpoch)
+
+                if avgDiceVal > bestSeg:
                     bestSeg = avgDiceVal
                     print(f"Saving Best Seg: epoch {self.currentEpoch}")
                     self.saveModel(f"BestSeg{self.tag}")
@@ -359,18 +408,6 @@ class MyTrainer():
         print("Running inference!")
         scoreDF = None
         for struct in self.tsDataloader:
-            # handle, patientID = struct
-            
-            # segs, _, phases, pcrs, patchIndices = handle()
-            # phases = torch.from_numpy(phases)
-
-            # torch.cuda.empty_cache()
-            # # pcr: torch.Tensor       = pcrs[0].detach().cpu()       # should be singleton tensor
-            # target: torch.Tensor    = torch.from_numpy(segs).int().detach().cpu()
-            # phase1: torch.Tensor    = phases[1].float().detach().cpu()
-            # phases: torch.Tensor    = phases.to(self.device, dtype=DTYPE_PHASE, non_blocking=True).unsqueeze(0)
-            # patchIndices            = torch.tensor(patchIndices).to(self.device)
-
             handles, patientIDs = zip(*struct)
             target, _, phases, pcrs, patchIndices = runHandles(handles)
 
@@ -399,13 +436,15 @@ class MyTrainer():
                 targetImageArr = reconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE)
                 
                 dice = Dice(segImageArr, targetImageArr)
+                tp, fp, tn, fn = tp_fp_tn_fn(segImageArr, targetImageArr)
 
                 segImageArr = segImageArr.numpy()
                 targetImageArr = targetImageArr.numpy()
 
-                hausdorff = hausdorff_distance(targetImageArr, segImageArr)
+                hausdorff = min(hausdorff_distance(targetImageArr, segImageArr), 1000)
                 
-                row = pd.DataFrame({"Patient ID": [patientID], "Dice (Full Image)": [dice], "Dice (Avg Over Patches)": [dicePatches],"HD95": [hausdorff]})
+                row = pd.DataFrame({"Patient ID": [patientID], "Dice (Full Image)": [dice], "Dice (Avg Over Patches)": [dicePatches],"HD95": [hausdorff],
+                                    "TP": [tp], "FP": [fp], "TN": [tn], "FN": [fn], "Sensitivity": [tp / (tp + fn)], "Specificity": [tn / (tn + fp)]})
                 if scoreDF is not None:
                     scoreDF = pd.concat([scoreDF, row])
                 else:
@@ -420,8 +459,10 @@ class MyTrainer():
                 
                 print(f"Finished patient {patientID}:\tDice {dice:.4f}\tHausdorff 95 {hausdorff:.4f}")
         print()
-        scoreDF.to_csv(os.path.join(self.outputFolder, resultsFolder, "scores.csv"), index=False)
+        savePath = os.path.join(self.outputFolder, resultsFolder, "scores.csv")
+        scoreDF.to_csv(savePath, index=False)
 
+        print(f"Saved results to: {savePath}")
         print(f"Average Dice: {scoreDF["Dice (Full Image)"].mean():.4f} +/- {scoreDF["Dice (Full Image)"].std():.4f}")
         print(f"Average Dice (Over Patches): {scoreDF["Dice (Avg Over Patches)"].mean():.4f} +/- {scoreDF["Dice (Avg Over Patches)"].std():.4f}")
         print(f"Average HD95: {scoreDF["HD95"].mean():.4f} +/- {scoreDF["HD95"].std():.4f}")
@@ -492,19 +533,21 @@ if __name__ == "__main__":
     pretrainedDecoderPath = None
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    tag = "IncreaseChannelsTo64AndAugment"
     bottleneck = BOTTLENECK_TRANSFORMERST
     # bottleneck = BOTTLENECK_CONV
     skips = True
     joint = False
-    test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
+    test  = True        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=100, modelName=modelName, tag="Batch4GroupNorm", joint=joint, test=test)
+    trainer = MyTrainer(nEpochs=100, modelName=modelName, tag=tag, joint=joint, test=test)
     
     trainer.setup(dataDir, 
                   device, 
                   pretrainedDecoderPath=pretrainedDecoderPath, 
                   useSkips=skips, 
                   bottleneck=bottleneck)
+    # trainer.train(continueTraining=True, modelName=f"LatestExtraNegativeSampling-FixedDMapAndShuffle.pth")
     trainer.train()
-    # trainer.inference(f"Latest{trainer.tag}.pth", "Latest")
-    trainer.inference(f"BestSeg{trainer.tag}.pth", "BestSeg")
+    # trainer.inference(f"Latest{tag}.pth", "Latest")
+    trainer.inference(f"BestSeg{tag}.pth", "BestSeg")

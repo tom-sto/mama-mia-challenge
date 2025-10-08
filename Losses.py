@@ -55,18 +55,33 @@ class DiceLoss(nn.Module):
     def forward(self, x: torch.Tensor, target: torch.Tensor):
         axes = tuple(range(x.ndim - 3, x.ndim))
         sumTarget = target.sum(axes)
+
+        # don't do Dice backprop when no foreground, let other losses handle that
+        if sumTarget.sum().item() == 0:
+            return torch.tensor(1., device=x.device)
+        
         sumInput  = x.sum(axes)
         intersect = (x * target).sum(axes)
 
         dice    = (intersect * 2 + EPS) / (sumInput + sumTarget + EPS)
+
+        # Balance foreground vs background
         fgMask  = (sumTarget > 0).float()
         bgMask  = -fgMask + 1
         
-        # weighting shenanigans. Balance foreground vs background
-        fgW     = bgMask.mean()
-        bgW     = fgMask.mean()
+        # If p% of patches contain tumor, scale those patches by q% = 100% - p%
+        # Scale the rest of the patches by p%. Then normalize.
+        fgW = bgMask.mean()
+        bgW = fgMask.mean()
 
-        weighted = (fgMask * fgW + bgMask * bgW) * dice
+        # Using fgMask.mean() as a proxy for Pr(Patch contains foreground) = p%
+        # Because we are scaling only the patches in fgMask by q% 
+        # E[Weighted Dice] = E[(p% * q% + q% * p%) * Dice]
+        #                  = fgW * fgMask.mean() * E[Dice] + bgW * bgMask.mean() * E[Dice] 
+        #                  = E[Dice] * 2 * fgW * bgW
+        normFactor = (1 / (fgW * bgW * 2))
+
+        weighted = (fgMask * fgW + bgMask * bgW) * dice * normFactor
         return 1 - weighted.mean()
     
 class SegLoss(nn.Module):
@@ -96,11 +111,22 @@ class SegLoss(nn.Module):
 # Assume input and target are same size (X, Y, Z) and the values of each entry are binary.
 # Return Dice loss and Dice score
 def Dice(recon: torch.Tensor, target: torch.Tensor):
-    r: torch.Tensor = recon.to(dtype=bool)
-    t: torch.Tensor = target.to(dtype=bool)
+    r: torch.Tensor = recon.bool()
+    t: torch.Tensor = target.bool()
 
     tp_2  = int(torch.sum(r & t).item()) << 1   # true positives
     mag_r = int(torch.sum(r).item())            # magnitude of recon
     mag_t = int(torch.sum(t).item())            # magnitude of target
     diceScore = (tp_2 + EPS) / (mag_r + mag_t + EPS)
     return diceScore
+
+def tp_fp_tn_fn(recon: torch.Tensor, target: torch.Tensor):
+    r: torch.Tensor = recon.bool()
+    t: torch.Tensor = target.bool()
+
+    tp = int(torch.sum(r & t).item())
+    fp = int(torch.sum(r & ~t).item())
+    tn = int(torch.sum(~r & ~t).item())
+    fn = int(torch.sum(~r & t).item())
+
+    return tp, fp, tn, fn

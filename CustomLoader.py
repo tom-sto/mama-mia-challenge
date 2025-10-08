@@ -1,7 +1,7 @@
 import random
 import torch
 from DataProcessing import GetData
-from torch.utils.data import Dataset, Sampler, BatchSampler
+from torch.utils.data import Dataset, BatchSampler
 
 # need this to load and track training data along with dmap vectors
 # group tensors by patient ID 
@@ -13,27 +13,9 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, ind: str):
         patientID, numPhases = ind
-        handle = self.data[numPhases][patientID]
+        handles = self.data[numPhases][patientID]
                         
-        return handle, patientID
-    
-class CustomSampler(Sampler):
-    def __init__(self, ind, shuffle=False, seed=None):
-        super().__init__()
-        self.indices = ind
-        self.shuffle = shuffle
-        self.seed = seed
-
-    def __iter__(self):
-        if self.shuffle:
-            # Set the seed for reproducibility if specified
-            if self.seed is not None:
-                random.seed(self.seed)
-            random.shuffle(self.indices)
-        return iter(self.indices)
-
-    def __len__(self):
-        return len(self.indices)
+        return handles, patientID
     
 class CustomBatchSampler(BatchSampler):
     def __init__(self, dataSplit: dict, batchSize: int, shuffle: bool = False, dropLast: bool = False, seed=None):
@@ -54,9 +36,9 @@ class CustomBatchSampler(BatchSampler):
                 rng.shuffle(patientIDs)
 
             # I'm gonna cheat a little bit here
-            # When we load images with more phases, we use more data (obviously)
+            # When we load images with more phases, we use more data (obviously).
             # So use smaller batch size with higher phase counts so it fits in VRAM
-            if numPhases == 5 or numPhases == 6:
+            if numPhases > 4:
                 batchSize = max(1, self.batchSize // 2)
             else:
                 batchSize = self.batchSize
@@ -89,16 +71,17 @@ class CustomBatchSampler(BatchSampler):
                 total += (n + batchSize - 1) // batchSize
         return total
 
+# need this because Torch doesn't handle loading data from dictionaries automatically
 def collate(x):
     return x
 
-def GetDataloaders(dataDir: str, patientDataPath: str, oversample: float, 
+def GetDataloaders(dataDir: str, patientDataPath: str, oversample: float, oversampleRadius: float,
                    batchSize: int = 1, shuffle=True, test=False):
-    data = GetData(dataDir, patientDataPath, oversample, test=test)
+    data = GetData(dataDir, patientDataPath, oversample=oversample, oversampleRadius=oversampleRadius, test=test)
 
     def makeLoader(split: str):
         dataset = CustomDataset(data=data[split])
-        sampler = CustomBatchSampler(data[split], batchSize=1 if split=="testing" else batchSize, shuffle=shuffle)
+        sampler = CustomBatchSampler(data[split], batchSize=1 if split!="training" else batchSize, shuffle=shuffle)
         return torch.utils.data.DataLoader(dataset, batch_sampler=sampler, collate_fn=collate, 
                                            num_workers=4, pin_memory=True, persistent_workers=True)
 

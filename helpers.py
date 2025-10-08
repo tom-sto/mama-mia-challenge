@@ -1,17 +1,16 @@
 import torch
 import pandas as pd
-import numba
 
 IMAGE_TYPES = ("phase", "seg", "dmap")
 PATCH_SIZE  = 32
-CHUNK_SIZE  = 64
-NUM_PATCHES = 64
+NUM_PATCHES = 32
+CHUNK_SIZE  = NUM_PATCHES
 
 ACQ_TIME_THRESHOLD = 750
 MIN_NUM_PHASES = 3
 
 DTYPE_SEG   = torch.bool
-DTYPE_DMAP  = torch.float16
+DTYPE_DMAP  = torch.float32
 DTYPE_PHASE = torch.float32
 
 BOTTLENECK_TRANSFORMERST = "TransformerST"
@@ -105,10 +104,8 @@ def CleanPatientData(df: pd.DataFrame,
             if pd.isna(d):
                 d = None
             elif m == "acquisition_times":
-                d = eval(d)
+                d = eval(d)     # convert from string '[x, y, z]' to list [x, y, z]
             md[m] = d
         data.append(md)
-
-    # data = [{m: df.loc[df["patient_id"] == pid.upper(), m] for m in columns} for pid in patient_ids]
 
     return data
