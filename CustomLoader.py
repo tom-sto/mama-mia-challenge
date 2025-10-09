@@ -75,9 +75,8 @@ class CustomBatchSampler(BatchSampler):
 def collate(x):
     return x
 
-def GetDataloaders(dataDir: str, patientDataPath: str, oversample: float, oversampleRadius: float,
-                   batchSize: int = 1, shuffle=True, test=False):
-    data = GetData(dataDir, patientDataPath, oversample=oversample, oversampleRadius=oversampleRadius, test=test)
+def GetDataloaders(dataDir: str, patientDataPath: str, batchSize: int = 1, shuffle=True, test=False):
+    data = GetData(dataDir, patientDataPath, test=test)
 
     def makeLoader(split: str):
         dataset = CustomDataset(data=data[split])

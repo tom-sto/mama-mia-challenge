@@ -2,6 +2,7 @@ import torch
 import os
 import matplotlib.pyplot as plt
 import SimpleITK as sitk
+from time import time
 from torch.utils.tensorboard import SummaryWriter
 from torchjd.aggregation import UPGrad
 from torchjd import mtl_backward
@@ -9,9 +10,9 @@ from MyUNet import MyUNet
 from Losses import PCRLoss, SegLoss, Dice, tp_fp_tn_fn
 from Schedulers import WarmupCosineAnnealingWithRestarts
 from CustomLoader import GetDataloaders
-from DataProcessing import reconstructImageFromPatches, runHandles
+from DataProcessing import ReconstructImageFromPatches, RunHandles, GetPatches
 from helpers import *
-from time import time
+from Augmenter import GetNoTransforms, GetTrainingTransforms
 
 class MyTrainer():
     def __init__(self, nEpochs: int, modelName: str = "", tag: str = "", joint: bool = True, test: bool = False,
@@ -27,6 +28,9 @@ class MyTrainer():
         self.oversampleFG = 0.3
         self.oversampleRadius = 0.25
         self.batchSize = 4
+
+        self.trainingCompose = GetTrainingTransforms()
+        self.valTestCompose = GetNoTransforms()
 
         self.clsLosses = []
         self.PCRPercentages = []
@@ -55,7 +59,7 @@ class MyTrainer():
         nHeads = 8
 
         self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
-                            expectedChannels=[1, 64, 128, 256, 320, 400],
+                            expectedChannels=[1, 64, 128, 256, 384, 576],
                             expectedStride=[2, 2, 2, 2, 2],
                             pretrainedDecoderPath=pretrainedDecoderPath,
                             patientDataPath=self.patientDataPath,
@@ -64,10 +68,9 @@ class MyTrainer():
                             joint=self.joint,
                             bottleneck=bottleneck,
                             nBottleneckLayers=4).to(device)
-        
+
         dataTime = time()
-        self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, self.patientDataPath, self.oversampleFG, 
-                                                                                 self.oversampleRadius, batchSize=self.batchSize, test=self.test)
+        self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, self.patientDataPath, batchSize=self.batchSize, test=self.test)
         print(f"\tTook {FormatSeconds(time() - dataTime)}")
 
         # change optimizer and scheduler
@@ -109,7 +112,7 @@ class MyTrainer():
 
         return self
 
-    def train(self, continueTraining: bool = False, modelName: str = None, shuffleHandles: bool = True):
+    def train(self, continueTraining: bool = False, modelName: str = None):
         if continueTraining:
             assert modelName is not None, "Cannot continue training if no model state is given."
             self.loadModel(modelName)
@@ -148,22 +151,28 @@ class MyTrainer():
 
             startEpoch = time()
             nBatches = len(self.trDataloader)
-            for idx, struct in enumerate(self.trDataloader):        # iterate over patient cases
-                patientHandles, patientIDs = zip(*struct)
-                if shuffleHandles:
-                    patientHandles = list(patientHandles)
-                    for i in range(len(patientHandles)):
-                        rd.shuffle(patientHandles[i])
-                handles = list(zip(*patientHandles))
-                nHandles = len(handles)
-                for i in range(nHandles):
-                    target, distMap, phases, pcrs, patchIndices = runHandles(handles[i])
 
+            iterations = ["oversample", "oversample", "oversample", "no tumor", "no tumor", "no tumor"]
+            nHandles = len(iterations)
+            for idx, struct in enumerate(self.trDataloader):        # iterate over patient cases
+                handles, patientIDs = zip(*struct)
+                if self.test:
+                    mris, dmap, seg, bbox = RunHandles(handles, self.trainingCompose)
+                else:
+                    mris, dmap, seg, bbox = RunHandles(handles, self.trainingCompose)
+                rd.shuffle(iterations)
+                for i, it in enumerate(iterations):
+                    if it == "oversample":
+                        args = [mris, dmap, seg, PATCH_SIZE, NUM_PATCHES, self.oversampleFG,
+                                self.oversampleRadius, bbox, False]
+                    else:
+                        args = [mris, dmap, seg, PATCH_SIZE, NUM_PATCHES, -1, 0, bbox, False]
+                    phases, distMap, target, pcrs, patchIndices = GetPatches(*args)
                     torch.cuda.empty_cache()
                     pcr: torch.Tensor       = pcrs
-                    target: torch.Tensor    = target.to(self.device, non_blocking=True)
+                    phases: torch.Tensor    = phases.transpose(1, 2).to(self.device, non_blocking=True)
                     distMap: torch.Tensor   = distMap.to(self.device, non_blocking=True)
-                    phases: torch.Tensor    = phases.to(self.device, non_blocking=True)
+                    target: torch.Tensor    = target.to(self.device, non_blocking=True)
                     patchIndices            = patchIndices.to(self.device)
 
                     with torch.autocast(self.device.type):
@@ -208,7 +217,7 @@ class MyTrainer():
                                     features=sharedFeatures, 
                                     aggregator=self.aggregator,
                                     tasks_params=[list(self.model.decoder.parameters()), 
-                                                list(self.model.classifier.parameters())],
+                                                  list(self.model.classifier.parameters())],
                                     shared_params=list(self.model.encoder.parameters()) + list(self.model.bottleneck.parameters()))
                     else:
                         scaledLoss = self.gradScaler.scale(segLoss)
@@ -257,12 +266,13 @@ class MyTrainer():
             nBatches = len(self.vlDataloader)
             for idx, struct in enumerate(self.vlDataloader):        # iterate over patient cases
                 handles, patientIDs = zip(*struct)
-                target, distMap, phases, pcrs, patchIndices = runHandles(handles)
-
+                phases, dmap, seg, bbox = RunHandles(handles, self.valTestCompose)
+                phases, distMap, target, pcrs, patchIndices = GetPatches(phases, dmap, seg, PATCH_SIZE, NUM_PATCHES, 0, 0, bbox, True)
                 torch.cuda.empty_cache()
+                pcr: torch.Tensor       = pcrs
+                phases: torch.Tensor    = phases.transpose(1, 2).to(self.device, non_blocking=True)
+                distMap: torch.Tensor   = distMap
                 target: torch.Tensor    = target.int()
-                distMap: torch.Tensor   = distMap.to(dtype=DTYPE_DMAP, non_blocking=True)
-                phases: torch.Tensor    = phases.to(self.device, dtype=DTYPE_PHASE, non_blocking=True)
                 patchIndices            = patchIndices.to(self.device)
 
                 with torch.autocast(self.device.type):
@@ -303,8 +313,9 @@ class MyTrainer():
                 spec = []
                 for i in range(len(patientIDs)):
                     dicePatches.append(Dice(segOut[i], target[i]))
-                    segImageArr = reconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE)
-                    targetImageArr = reconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE)
+
+                    segImageArr     = ReconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE)
+                    targetImageArr  = ReconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE)
                     
                     diceFull.append(Dice(segImageArr, targetImageArr))
                     tp, fp, tn, fn = tp_fp_tn_fn(segImageArr, targetImageArr)
@@ -409,13 +420,14 @@ class MyTrainer():
         scoreDF = None
         for struct in self.tsDataloader:
             handles, patientIDs = zip(*struct)
-            target, _, phases, pcrs, patchIndices = runHandles(handles)
+            phases, dmap, seg, bbox = RunHandles(handles, self.valTestCompose)
+            phases, _, target, pcrs, patchIndices = GetPatches(phases, dmap, seg, PATCH_SIZE, NUM_PATCHES, 0, 0, bbox, True)
 
             torch.cuda.empty_cache()
-            target: torch.Tensor    = torch.from_numpy(target).int().detach().cpu()
-            phases: torch.Tensor    = torch.from_numpy(phases).to(self.device, dtype=DTYPE_PHASE, non_blocking=True)
+            target: torch.Tensor    = target.int()
+            phases: torch.Tensor    = phases.transpose(1, 2).to(self.device, dtype=DTYPE_PHASE, non_blocking=True)
             phase1: torch.Tensor    = phases[:, 1].float().detach().cpu()
-            patchIndices            = torch.from_numpy(patchIndices).to(self.device)
+            patchIndices            = patchIndices.to(self.device)
 
             with torch.autocast(self.device.type):
                 n = patchIndices.shape[1]
@@ -431,9 +443,9 @@ class MyTrainer():
             patchIndices = patchIndices.detach().cpu()
             for i, patientID in enumerate(patientIDs):
                 dicePatches = Dice(segOut[i], target[i])
-                phaseImageArr = reconstructImageFromPatches(phase1[i], patchIndices[i], PATCH_SIZE)
-                segImageArr = reconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE)
-                targetImageArr = reconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE)
+                phaseImageArr   = ReconstructImageFromPatches(phase1[i], patchIndices[i], PATCH_SIZE)
+                segImageArr     = ReconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE)
+                targetImageArr  = ReconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE)
                 
                 dice = Dice(segImageArr, targetImageArr)
                 tp, fp, tn, fn = tp_fp_tn_fn(segImageArr, targetImageArr)
@@ -531,16 +543,16 @@ if __name__ == "__main__":
     dataDir = rf"{os.environ.get("MAMAMIA_DATA")}/my_preprocessed_data/{datasetName}"
     # pretrainedDecoderPath = "pretrained_weights/nnunet_pretrained_weights_64_best.pth"
     pretrainedDecoderPath = None
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     tag = "IncreaseChannelsTo64AndAugment"
-    bottleneck = BOTTLENECK_TRANSFORMERST
-    # bottleneck = BOTTLENECK_CONV
+    # bottleneck = BOTTLENECK_TRANSFORMERST
+    bottleneck = BOTTLENECK_CONV
     skips = True
     joint = False
-    test  = True        # testing the model on a few specific patients so we don't have to wait for the dataloader
+    test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=100, modelName=modelName, tag=tag, joint=joint, test=test)
+    trainer = MyTrainer(nEpochs=80, modelName=modelName, tag=tag, joint=joint, test=test)
     
     trainer.setup(dataDir, 
                   device, 

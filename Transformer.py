@@ -67,7 +67,7 @@ class MyTransformerST(nn.Module):
         self.transformerT.apply(init_weights_transformer)
         self.transformerS.apply(init_weights_transformer)
     
-    def forward(self, x: torch.Tensor, shape: tuple[int], patientIDs: list[str], patchIndices: list[int]):
+    def forward(self, x: torch.Tensor, shape: tuple[int], patientIDs: list[str], patchIndices: torch.Tensor):
         B, T, N, E, X, Y, Z = shape
         patientDataEmb = torch.empty(B, N*X*Y*Z, T, self.patientDataEmbed.out_features, device=x.device)      # [B, N, T, npatientDataOutFeatures]
         acqTimes = torch.zeros(B, N*X*Y*Z, T)

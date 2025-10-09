@@ -8,25 +8,57 @@ from functools import partial
 from itertools import product
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from helpers import PATCH_SIZE, NUM_PATCHES, ACQ_TIME_THRESHOLD, MIN_NUM_PHASES, DTYPE_DMAP, DTYPE_SEG, DTYPE_PHASE
-from Augmenter import GetNoTransforms, GetTrainingTransforms, DoTransforms
+from helpers import ACQ_TIME_THRESHOLD, MIN_NUM_PHASES, DTYPE_DMAP, DTYPE_SEG, DTYPE_PHASE
+from Augmenter import DoTransforms
 
 @torch.jit.script
-def extractPatches(array: torch.Tensor, patch_indices: list[list[int]], patch_size: int):
-    n_patches = len(patch_indices)
-    patches = torch.empty((n_patches, patch_size, patch_size, patch_size), dtype=array.dtype)
-    for i in range(n_patches):
-        idx: list[int] = patch_indices[i]
-        x, y, z = idx
-        patches[i] = array[x:x+patch_size, y:y+patch_size, z:z+patch_size]
+def ExtractPatches(array: list[torch.Tensor], patch_indices: list[list[list[int]]], patch_size: int):
+    n_patches = len(patch_indices[0])
+    n_arrays  = len(array)      # batch size
+    
+    if array[0].ndim == 4:
+        n_phases = len(array[0])
+        patches = torch.empty((n_arrays, n_patches, n_phases, patch_size, patch_size, patch_size), dtype=array[0].dtype)
+    elif array[0].ndim == 3:
+        patches = torch.empty((n_arrays, n_patches, patch_size, patch_size, patch_size), dtype=array[0].dtype)
+    else:
+        raise Exception(f"Cannot extract 3D patches from {array[0].ndim}D tensor!")
+    
+    for i in range(n_arrays):
+        arr = array[i]
+        for j in range(n_patches):
+            idx: list[int] = patch_indices[i][j]
+            x, y, z = idx
+            if arr.ndim == 3:
+                patches[i, j] = arr[x:x+patch_size, y:y+patch_size, z:z+patch_size]
+            elif arr.ndim > 3:
+                patches[i, j] = arr[..., x:x+patch_size, y:y+patch_size, z:z+patch_size]
+            else:
+                raise Exception(f"Cannot extract 3D patches from {arr.ndim}D tensor!")
+        
     return patches
 
-def runHandles(handles):
+def RunHandles(handles, augmentCompose):
     with ThreadPoolExecutor(max_workers=4) as executor:
         results = list(executor.map(lambda h: h(), handles))
 
-    targets, distMaps, phases, pcrs, patchIndices = zip(*results)
-    return torch.stack(targets), torch.stack(distMaps), torch.stack(phases), torch.stack(pcrs), torch.stack(patchIndices)
+    phaseArrs, dmapArr, segArr, bbox = zip(*results)
+    phases = []
+    dmaps = []
+    segs = []
+    for i in range(len(bbox)):
+        phaseTensors = torch.from_numpy(phaseArrs[i]).to(DTYPE_PHASE)
+        phaseTensors = phaseTensors / phaseTensors.amax(dim=(1, 2, 3), keepdim=True)       # normalize each phase intensity here
+        dmapTensors  = torch.from_numpy(dmapArr[i]).to(DTYPE_DMAP) if dmapArr[i] is not None else None
+        segTensors   = torch.from_numpy(segArr[i]).to(DTYPE_SEG)
+        phase, dmap, seg = DoTransforms(phaseTensors, 
+                                        dmapTensors, 
+                                        segTensors,
+                                        augmentCompose)
+        phases.append(phase)
+        dmaps.append(dmap)
+        segs.append(seg)
+    return phases, dmaps, segs, bbox
 
 ''' 
 data {
@@ -55,16 +87,12 @@ def defaultPhaseDict():
 def defaultSplitDict():
     return defaultdict(defaultPhaseDict)
 
-def GetData(parentDir: str, patientDataPath: str, test: bool = False, oversample: float = 0.,
-            oversampleRadius: float = 0.25):
+def GetData(parentDir: str, patientDataPath: str, test: bool = False):
     print("Collecting data...")
 
     # Load patient metadata once
     df = pd.read_excel(patientDataPath, "dataset_info")[["patient_id", "acquisition_times"]]
     np.random.seed(42)
-
-    trainingCompose = GetTrainingTransforms()
-    valTestCompose = GetNoTransforms()
 
     # Pickle-safe nested defaultdict
     data = defaultdict(defaultSplitDict)
@@ -100,36 +128,32 @@ def GetData(parentDir: str, patientDataPath: str, test: bool = False, oversample
             phases = sorted(glob.glob(os.path.join(trtsDir, f"{patient_id}_0*.zarr")))[:nPhases]
             dmap = os.path.join(trtsDir, f"{patient_id}_dmap.zarr")
             seg = os.path.join(trtsDir, f"{patient_id}_seg.zarr")
-
-            segZarr     = zarr.open(seg, mode='r')
-            dmapZarr    = zarr.open(dmap, mode='r') if os.path.exists(dmap) else None
-            phaseZarrs  = [zarr.open(p, mode='r') for p in phases]
             
             bboxPath = os.path.join(trtsDir, f"{patient_id}_bbox.txt")
             # Read bounding box
             with open(bboxPath, 'r') as f:
                 bbox = eval(f.read().strip())
 
+            handle = partial(LoadImages, phases, dmap, seg, bbox)
+
             # Load the image patches - I feel very clever for this approach ;)
             # Store partial function handles in a data structure
             # and then run them only when I need them (making sure to delete the arrays after to save memory)
             # return segImg handles, dmapImg handles, [phaseImg handles for p in nPhases] 
-            if trts == "training" and np.random.random() < 0.9:
-                handle1 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, oversample, bbox, False, oversampleRadius, trainingCompose)
-                handle2 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, oversample, bbox, False, oversampleRadius, trainingCompose)
-                handle3 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, -1, bbox, False, oversampleRadius, trainingCompose)
-                handle4 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, -1, bbox, False, oversampleRadius, trainingCompose)
+            if (trts == "training" and np.random.random() < 0.9) or trts == "testing":
+                # handle1 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, oversample, bbox, False, oversampleRadius, trainingCompose)
+                # handle2 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, oversample, bbox, False, oversampleRadius, trainingCompose)
+                # handle3 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, -1, bbox, False, oversampleRadius, trainingCompose)
+                # handle4 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, -1, bbox, False, oversampleRadius, trainingCompose)
                 
-                handles = [handle1, handle2, handle3, handle4]
+                # handles = [handle1, handle2, handle3, handle4]
 
                 # Store data in the structure
-                data[trts][nPhases][patient_id] = handles
-            elif trts == "training":
-                data["validation"][nPhases][patient_id] = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, 
-                                                                  0, bbox, True, oversampleRadius, valTestCompose)
+                data[trts][nPhases][patient_id] = handle
             else:
-                data[trts][nPhases][patient_id] = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, 
-                                                          0, bbox, True, oversampleRadius, valTestCompose)
+                # data["validation"][nPhases][patient_id] = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, 
+                #                                                   0, bbox, True, oversampleRadius, valTestCompose)
+                data["validation"][nPhases][patient_id] = handle
 
     def countPatients(split_data: dict) -> int:
         return sum(len(patients) for patients in split_data.values())
@@ -140,43 +164,41 @@ def GetData(parentDir: str, patientDataPath: str, test: bool = False, oversample
 
     return dict(data)  # Convert defaultdict to regular dict for return
 
-# need to select patch indices inside of function handle since we want it to be consistent for all images in a case,
-# but it should pick different patches each iteration
-def GetPatches(phaseZarrs: list[zarr.Array], dmapZarr: zarr.Array, segZarr: zarr.Array, patchSize: int,
-               numPatches: int, oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool,
-               oversampleRadius: float, augmentationCompose):
-    shape = segZarr.shape
-    patchIndices = getIndices(numPatches, patchSize, shape, 
-                              oversample=oversample, fgBox=fgBox, 
+def LoadImages(phases, dmap, seg, bbox):
+    phaseZarrs  = np.stack([zarr.load(p) for p in phases])
+    dmapZarr    = zarr.load(dmap) if os.path.exists(dmap) else None
+    segZarr     = zarr.load(seg)
+    return phaseZarrs, dmapZarr, segZarr, bbox
+
+def GetPatches(phases: list[torch.Tensor], dmap: list[torch.Tensor], seg: list[torch.Tensor], patchSize: int,
+               numPatches: int, oversample: float, oversampleRadius: float, fgBox: tuple[list[int]], 
+               loadWholeImage: bool):
+    patchIndices = [GetIndices(numPatches, patchSize, seg[i].shape, 
+                              oversample=oversample, fgBox=bbox, 
                               loadWholeImage=loadWholeImage,
                               oversampleRadius=oversampleRadius)
+                    for i, bbox in enumerate(fgBox)]
 
-    segArr  = torch.from_numpy(segZarr[...]).to(DTYPE_SEG)
-    dmapArr = torch.from_numpy(dmapZarr[...]).to(DTYPE_DMAP) if dmapZarr is not None else None
-    phaseArrs = [torch.from_numpy(vol[...].astype(np.float32) / np.max(vol)).to(DTYPE_PHASE) for vol in phaseZarrs]
-
-    phaseArrs, segArr, dmapArr = DoTransforms(phaseArrs, segArr, dmapArr, augmentationCompose)
-
-    segImgs = extractPatches(segArr, patchIndices, patchSize)
+    segImgs = ExtractPatches(seg, patchIndices, patchSize)
 
     # This one allowed to be None because don't need it for testing, and might not need it if no Boundary Loss
-    if dmapArr is not None:
-        dmapImgs = extractPatches(dmapArr, patchIndices, patchSize)
+    if dmap[0] is not None:
+        dmapImgs = ExtractPatches(dmap, patchIndices, patchSize)
     else:
         dmapImgs = None
     
-    phaseImgs = torch.stack([extractPatches(vol, patchIndices, patchSize) for vol in phaseArrs])
+    phaseImgs = ExtractPatches(phases, patchIndices, patchSize)
     
     # TODO: Finish me!
     pcrValues = torch.tensor([0])
     
-    return segImgs, dmapImgs, phaseImgs, pcrValues, torch.tensor(patchIndices).int()
+    return phaseImgs, dmapImgs, segImgs, pcrValues, torch.tensor(patchIndices).int()
 
 # randomly sample N patches
-def getIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool,
+def GetIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool,
                shuffleFullImageIndices: bool = True, oversampleRadius: float = 0.25):
     if loadWholeImage:
-        pX, pY, pZ = getFullImageIndices(imgShape, patchSize, minOverlap=patchSize // 4)
+        pX, pY, pZ = GetFullImageIndices(imgShape, patchSize, minOverlap=patchSize // 4)
         indices = list(product(pX, pY, pZ))
         indices = [list(c) for c in indices]
         if shuffleFullImageIndices:
@@ -222,32 +244,32 @@ def getIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample:
         indices.append(start)
     return indices
 
-def getFullImageIndices(imageShape, patchSize, minOverlap):
-    def computeIdealStride(imageSize, patchSize, minOverlap):
+def GetFullImageIndices(imageShape, patchSize, minOverlap):
+    def ComputeIdealStride(imageSize, patchSize, minOverlap):
         assert patchSize <= imageSize, "Patch must be smaller than or equal to image size"
         maxStride = patchSize - minOverlap
         numPatches = math.ceil((imageSize - patchSize) / maxStride) + 1
         stride = (imageSize - patchSize) // (numPatches - 1) + 1 if numPatches > 1 else 0
         return stride
     
-    def computeAxisIndices(imageLen, patchLen, strideLen):
+    def ComputeAxisIndices(imageLen, patchLen, strideLen):
         indices = list(range(0, max(imageLen - patchLen + 1, 1), strideLen))
         if indices[-1] + patchLen < imageLen:
             indices.append(imageLen - patchLen)
         return indices
     
     x, y, z = imageShape
-    xStride = computeIdealStride(x, patchSize, minOverlap)
-    yStride = computeIdealStride(y, patchSize, minOverlap)
-    zStride = computeIdealStride(z, patchSize, minOverlap)
+    xStride = ComputeIdealStride(x, patchSize, minOverlap)
+    yStride = ComputeIdealStride(y, patchSize, minOverlap)
+    zStride = ComputeIdealStride(z, patchSize, minOverlap)
     
-    xIndices = computeAxisIndices(x, patchSize, xStride)
-    yIndices = computeAxisIndices(y, patchSize, yStride)
-    zIndices = computeAxisIndices(z, patchSize, zStride)
+    xIndices = ComputeAxisIndices(x, patchSize, xStride)
+    yIndices = ComputeAxisIndices(y, patchSize, yStride)
+    zIndices = ComputeAxisIndices(z, patchSize, zStride)
 
     return xIndices, yIndices, zIndices
 
-def reconstructImageFromPatches(patches: torch.Tensor, patchCoords: torch.Tensor, patchSize: int):
+def ReconstructImageFromPatches(patches: torch.Tensor, patchCoords: torch.Tensor, patchSize: int):
     # Determine the target dimensions from the maximum coordinates in patchCoords
     max_coords = torch.max(patchCoords, dim=0).values
     target_dims = max_coords + patchSize
@@ -270,24 +292,6 @@ def reconstructImageFromPatches(patches: torch.Tensor, patchCoords: torch.Tensor
     reconstructed_image /= torch.clamp(weight_map, min=1)
 
     return reconstructed_image.to(patches.dtype)
-
-def subpatchTensor(x: torch.Tensor, subpatchSize: int):
-    assert len(x.shape) == 5, f"Expected shape (B, C, X, Y, Z). Got: {x.shape}"
-    B, T, X, Y, Z = x.shape
-    assert X % subpatchSize == 0 and Y % subpatchSize == 0 and Z % subpatchSize == 0, \
-        "Input dimensions must be divisible by subpatchSize"
-
-    # Reshape into subpatches
-    x = x.unfold(2, subpatchSize, subpatchSize)  # Unfold X
-    x = x.unfold(3, subpatchSize, subpatchSize)  # Unfold Y
-    x = x.unfold(4, subpatchSize, subpatchSize)  # Unfold Z
-    x = x.permute(0, 2, 3, 4, 1, 5, 6, 7)  # [B, X//subpatchSize, Y//subpatchSize, Z//subpatchSize, C, subpatchSize, subpatchSize, subpatchSize]
-    x = x.reshape(B, -1, T, subpatchSize, subpatchSize, subpatchSize)  # [B, N, T, subpatchSize, subpatchSize, subpatchSize]
-    x = x.unsqueeze(3)          # Add a singleton channel dimension for patch embedding: [B, N, T, 1, subpatchSize, subpatchSize, subpatchSize]
-    x = x.permute(0, 2, 1, 3, 4, 5, 6)      # [B, T, N, 1, subpatchSize, subpatchSize, subpatchSize]
-
-    numSubpatches = (X // subpatchSize) * (Y // subpatchSize) * (Z // subpatchSize)
-    return x, numSubpatches
 
 def GetBinaryArrayFromTrainingTensor(tensor: torch.Tensor):
     maxIndices = torch.argmax(tensor, dim=2, keepdim=True)
@@ -320,35 +324,35 @@ def Crop(image, nonzeroCoords: np.ndarray) -> sitk.Image:
 
 if __name__ == "__main__":
     print("Starting program!")
-    filePath = r"E:\MAMA-MIA\my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm\training\ispy2_738041_seg.zarr"
-    outFolder = os.path.dirname(os.path.dirname(filePath))
-    arr = zarr.load(filePath)
-    # print(arr.dtype)
-    if "seg" in filePath:
-        arr = arr.astype(int)
-    nii = sitk.GetImageFromArray(arr)
-    sitk.WriteImage(nii, os.path.join(outFolder, "og.nii"))
-    print("Wrote og.nii")
+    # filePath = r"E:\MAMA-MIA\my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm\training\ispy2_738041_seg.zarr"
+    # outFolder = os.path.dirname(os.path.dirname(filePath))
+    # arr = zarr.load(filePath)
+    # # print(arr.dtype)
+    # if "seg" in filePath:
+    #     arr = arr.astype(int)
+    # nii = sitk.GetImageFromArray(arr)
+    # sitk.WriteImage(nii, os.path.join(outFolder, "og.nii"))
+    # print("Wrote og.nii")
 
-    patchSize = 32
-    dev = torch.device("cuda")
+    # patchSize = 32
+    # dev = torch.device("cuda")
 
-    handles, indices = loadImagePatches(filePath, dev, patchSize=patchSize)
+    # handles, indices = loadImagePatches(filePath, dev, patchSize=patchSize)
 
-    allPatches  = []
-    allCoords   = []
-    for handle in handles:
-        patches, coords = handle()
-        # print(f"Patches shape: {patches.shape}")
-        # print(f"Coords shape: {coords.shape}")
-        allPatches.append(patches)
-        allCoords.append(coords)
+    # allPatches  = []
+    # allCoords   = []
+    # for handle in handles:
+    #     patches, coords = handle()
+    #     # print(f"Patches shape: {patches.shape}")
+    #     # print(f"Coords shape: {coords.shape}")
+    #     allPatches.append(patches)
+    #     allCoords.append(coords)
 
-    print(f"there are {len(allPatches)} patches in the image")
-    print(f"there are {len(allCoords)} coords")
+    # print(f"there are {len(allPatches)} patches in the image")
+    # print(f"there are {len(allCoords)} coords")
 
-    recon: torch.Tensor = reconstructImageFromPatches(allPatches, allCoords, patchSize, dev)
-    if "seg" in filePath:
-        recon = recon.int()
+    # recon: torch.Tensor = reconstructImageFromPatches(allPatches, allCoords, patchSize, dev)
+    # if "seg" in filePath:
+    #     recon = recon.int()
 
-    sitk.WriteImage(sitk.GetImageFromArray(recon.cpu().detach().numpy()), os.path.join(outFolder, "recon.nii"))
+    # sitk.WriteImage(sitk.GetImageFromArray(recon.cpu().detach().numpy()), os.path.join(outFolder, "recon.nii"))

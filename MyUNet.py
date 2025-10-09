@@ -45,7 +45,7 @@ class MyUNet(torch.nn.Module):
         self.classifier = ClassifierHead(dim=expectedChannels[-1])
         self.ret = "all" if joint else "seg"
 
-    def forward(self, x: torch.Tensor, patientIDs: list[str], patchIdxs: list[tuple[int]], patientData: list = None):
+    def forward(self, x: torch.Tensor, patientIDs: list[str], patchIdxs: torch.Tensor, patientData: list = None):
         x, skips, shape = self.encoder(x)
         B, N = shape[0], shape[2]
 
