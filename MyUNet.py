@@ -1,5 +1,5 @@
 import torch
-from Transformer import MyTransformerST
+from Transformer import MyTransformerTS, MyTransformerST
 from Bottleneck import *
 from PCRClassifier import ClassifierHead
 from PatchEmbed import PatchEncoder, PatchDecoder
@@ -20,7 +20,7 @@ class MyUNet(torch.nn.Module):
                  nBottleneckLayers: int = 4):
         super().__init__()
         
-        self.encoder = PatchEncoder(expectedChannels, expectedStride, useSkips=useSkips)
+        self.encoder = PatchEncoder(expectedChannels, expectedStride, dropout=0.1, useSkips=useSkips)
         self.decoder = PatchDecoder(expectedChannels, useSkips=useSkips)
         self.poolSkips = AttentionPooling(expectedChannels[-1], nHeads)
         
@@ -33,6 +33,8 @@ class MyUNet(torch.nn.Module):
 
         self.bottleneckType = bottleneck
         match bottleneck:
+            case helpers.BOTTLENECK_TRANSFORMERTS:
+                self.bottleneck = MyTransformerTS(expectedPatchSize, expectedChannels, nHeads, nBottleneckLayers, patientDataPath)
             case helpers.BOTTLENECK_TRANSFORMERST:
                 self.bottleneck = MyTransformerST(expectedPatchSize, expectedChannels, nHeads, nBottleneckLayers, patientDataPath)
             

@@ -10,7 +10,7 @@ from MyUNet import MyUNet
 from Losses import PCRLoss, SegLoss, Dice, tp_fp_tn_fn
 from Schedulers import WarmupCosineAnnealingWithRestarts
 from CustomLoader import GetDataloaders
-from DataProcessing import ReconstructImageFromPatches, RunHandles, GetPatches
+from DataProcessing import ReconstructImageFromPatches, GetPatches
 from helpers import *
 from Augmenter import GetNoTransforms, GetTrainingTransforms
 
@@ -22,8 +22,8 @@ class MyTrainer():
         
         # Parameters to change!
         self.pretrainSegmentation = self.nEpochs * 0.5
-        self.peakLR = 2e-5
-        self.minLR = 1e-8
+        self.peakLR = 3e-5
+        self.minLR = 1e-5
         self.currentEpoch = 0
         self.oversampleFG = 0.3
         self.oversampleRadius = 0.25
@@ -56,7 +56,7 @@ class MyTrainer():
               bottleneck: str = "MyTransformer"):
 
         self.device = device
-        nHeads = 8
+        nHeads = 16
 
         self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
                             expectedChannels=[1, 64, 128, 256, 384, 576],
@@ -67,26 +67,28 @@ class MyTrainer():
                             useSkips=useSkips,
                             joint=self.joint,
                             bottleneck=bottleneck,
-                            nBottleneckLayers=4).to(device)
+                            nBottleneckLayers=6).to(device)
 
         dataTime = time()
-        self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, self.patientDataPath, batchSize=self.batchSize, test=self.test)
+        self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, self.patientDataPath, self.trainingCompose, self.valTestCompose,
+                                                                                 batchSize=self.batchSize, shuffle=True, test=self.test)
         print(f"\tTook {FormatSeconds(time() - dataTime)}")
 
         # change optimizer and scheduler
-        self.optimizer = torch.optim.AdamW([
-            {'params': self.model.encoder.parameters(), 'lr': self.minLR * 20, 'weight_decay': 1e-4},
-            {'params': self.model.bottleneck.parameters(), 'lr': self.minLR, 'weight_decay': 1e-4},
-            {'params': self.model.decoder.parameters(), 'lr': self.minLR * 10,  'weight_decay': 1e-4},
-            {'params': self.model.classifier.parameters(), 'lr': self.minLR * 50,  'weight_decay': 1e-4}
-        ])
-        # self.optimizer = torch.optim.AdamW(params=self.model.parameters(), lr=self.minLR, weight_decay=1e-4)
+        # self.optimizer = torch.optim.AdamW([
+        #     {'params': self.model.encoder.parameters(), 'lr': self.minLR * 20, 'weight_decay': 1e-4},
+        #     {'params': self.model.bottleneck.parameters(), 'lr': self.minLR, 'weight_decay': 1e-4},
+        #     {'params': self.model.decoder.parameters(), 'lr': self.minLR * 10,  'weight_decay': 1e-4},
+        #     {'params': self.model.classifier.parameters(), 'lr': self.minLR * 50,  'weight_decay': 1e-4}
+        # ])
+        self.optimizer = torch.optim.AdamW(params=self.model.parameters(), lr=self.minLR, weight_decay=1e-4)
 
         self.gradScaler = torch.GradScaler(device.type)
         self.aggregator = UPGrad()
 
-        nWarmupSteps = round(0.05 * self.nEpochs)  # 5% warmup
-        nCycleSteps = round(0.475 * self.nEpochs) + 1   # do 2 cycles
+        nWarmupSteps = 0
+        # nCycleSteps = round(0.475 * self.nEpochs) + 1   # do 2 cycles
+        nCycleSteps = self.nEpochs
 
         self.LRScheduler = WarmupCosineAnnealingWithRestarts(
             self.optimizer,
@@ -155,11 +157,7 @@ class MyTrainer():
             iterations = ["oversample", "oversample", "oversample", "no tumor", "no tumor", "no tumor"]
             nHandles = len(iterations)
             for idx, struct in enumerate(self.trDataloader):        # iterate over patient cases
-                handles, patientIDs = zip(*struct)
-                if self.test:
-                    mris, dmap, seg, bbox = RunHandles(handles, self.trainingCompose)
-                else:
-                    mris, dmap, seg, bbox = RunHandles(handles, self.trainingCompose)
+                mris, dmap, seg, bbox, patientIDs = zip(*struct)
                 rd.shuffle(iterations)
                 for i, it in enumerate(iterations):
                     if it == "oversample":
@@ -265,8 +263,7 @@ class MyTrainer():
 
             nBatches = len(self.vlDataloader)
             for idx, struct in enumerate(self.vlDataloader):        # iterate over patient cases
-                handles, patientIDs = zip(*struct)
-                phases, dmap, seg, bbox = RunHandles(handles, self.valTestCompose)
+                phases, dmap, seg, bbox, patientIDs = zip(*struct)
                 phases, distMap, target, pcrs, patchIndices = GetPatches(phases, dmap, seg, PATCH_SIZE, NUM_PATCHES, 0, 0, bbox, True)
                 torch.cuda.empty_cache()
                 pcr: torch.Tensor       = pcrs
@@ -399,7 +396,17 @@ class MyTrainer():
     def inference(self, stateDictPath: str, resultsTag: str,
                   outputPath: str = "predSegmentationsCropped", outputPathPCR: str = "predPCR"):
         stateDictPath = os.path.join(self.outputFolder, stateDictPath)
-        stateDict = torch.load(stateDictPath, map_location=self.device, weights_only=False)
+        try:
+            stateDict = torch.load(stateDictPath, map_location=self.device, weights_only=False)
+        except:
+            print(f"Failed to load {stateDictPath}, loading Latest model instead.")
+            try:
+                stateDictPath = os.path.join(self.outputFolder, f"Latest{self.tag}.pth")
+                resultsTag = "Latest"
+                stateDict = torch.load(stateDictPath, map_location=self.device, weights_only=False)
+            except:
+                print(f"Failed to load latest model! Did you run a model with the tag '{self.tag}'?")
+                return
         modelState = stateDict['networkWeights']
         epoch = stateDict["epoch"]
         print(f"Loading {os.path.basename(stateDictPath)} from epoch {epoch}")
@@ -419,8 +426,7 @@ class MyTrainer():
         print("Running inference!")
         scoreDF = None
         for struct in self.tsDataloader:
-            handles, patientIDs = zip(*struct)
-            phases, dmap, seg, bbox = RunHandles(handles, self.valTestCompose)
+            phases, dmap, seg, bbox, patientIDs = zip(*struct)
             phases, _, target, pcrs, patchIndices = GetPatches(phases, dmap, seg, PATCH_SIZE, NUM_PATCHES, 0, 0, bbox, True)
 
             torch.cuda.empty_cache()
@@ -456,7 +462,8 @@ class MyTrainer():
                 hausdorff = min(hausdorff_distance(targetImageArr, segImageArr), 1000)
                 
                 row = pd.DataFrame({"Patient ID": [patientID], "Dice (Full Image)": [dice], "Dice (Avg Over Patches)": [dicePatches],"HD95": [hausdorff],
-                                    "TP": [tp], "FP": [fp], "TN": [tn], "FN": [fn], "Sensitivity": [tp / (tp + fn)], "Specificity": [tn / (tn + fp)]})
+                                    "TP": [tp], "FP": [fp], "TN": [tn], "FN": [fn], "Sensitivity": [tp / (tp + fn)], "Specificity": [tn / (tn + fp)],
+                                    "Accuracy": [(tp + tn) / (tp + tn + fp + fn)], "Precision": [tp / (tp + fp)]})
                 if scoreDF is not None:
                     scoreDF = pd.concat([scoreDF, row])
                 else:
@@ -469,7 +476,7 @@ class MyTrainer():
                 sitk.WriteImage(sitk.GetImageFromArray(phaseImageArr.numpy()),
                                 os.path.join(outputPath, f"{patientID}_phase.nii"))
                 
-                print(f"Finished patient {patientID}:\tDice {dice:.4f}\tHausdorff 95 {hausdorff:.4f}")
+                print(f"Finished patient {patientID}\tDice: {dice:.4f}\tHausdorff 95: {hausdorff:.4f}")
         print()
         savePath = os.path.join(self.outputFolder, resultsFolder, "scores.csv")
         scoreDF.to_csv(savePath, index=False)
@@ -478,6 +485,10 @@ class MyTrainer():
         print(f"Average Dice: {scoreDF["Dice (Full Image)"].mean():.4f} +/- {scoreDF["Dice (Full Image)"].std():.4f}")
         print(f"Average Dice (Over Patches): {scoreDF["Dice (Avg Over Patches)"].mean():.4f} +/- {scoreDF["Dice (Avg Over Patches)"].std():.4f}")
         print(f"Average HD95: {scoreDF["HD95"].mean():.4f} +/- {scoreDF["HD95"].std():.4f}")
+        print(f"Average Sensitivity: {scoreDF["Sensitivity"].mean():.4f} +/- {scoreDF["Sensitivity"].std():.4f}")
+        print(f"Average Specificity: {scoreDF["Specificity"].mean():.4f} +/- {scoreDF["Specificity"].std():.4f}")
+        print(f"Average Accuracy: {scoreDF["Accuracy"].mean():.4f} +/- {scoreDF["Accuracy"].std():.4f}")
+        print(f"Average Precision: {scoreDF["Precision"].mean():.4f} +/- {scoreDF["Precision"].std():.4f}")
 
 # TODO: Finish me
         # from score_task1 import doScoring
@@ -545,14 +556,15 @@ if __name__ == "__main__":
     pretrainedDecoderPath = None
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    tag = "IncreaseChannelsTo64AndAugment"
-    # bottleneck = BOTTLENECK_TRANSFORMERST
-    bottleneck = BOTTLENECK_CONV
+    tag = "Oct13-MoreBottleneckHigherLR"
+    # bottleneck = BOTTLENECK_TRANSFORMERTS
+    bottleneck = BOTTLENECK_TRANSFORMERST
+    # bottleneck = BOTTLENECK_CONV
     skips = True
     joint = False
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=80, modelName=modelName, tag=tag, joint=joint, test=test)
+    trainer = MyTrainer(nEpochs=100, modelName=modelName, tag=tag, joint=joint, test=test)
     
     trainer.setup(dataDir, 
                   device, 

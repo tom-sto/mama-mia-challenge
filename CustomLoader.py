@@ -2,20 +2,33 @@ import random
 import torch
 from DataProcessing import GetData
 from torch.utils.data import Dataset, BatchSampler
+from helpers import DTYPE_DMAP, DTYPE_SEG, DTYPE_PHASE
+from Augmenter import DoTransforms
 
 # need this to load and track training data along with dmap vectors
 # group tensors by patient ID 
 # (then image type: MRI, dmap, seg)
 # then by phase (training data has between 3 and 6 phases)
 class CustomDataset(Dataset):
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, augmentCompose):
         self.data = data
+        self.augment = augmentCompose
 
     def __getitem__(self, ind: str):
         patientID, numPhases = ind
-        handles = self.data[numPhases][patientID]
-                        
-        return handles, patientID
+        handle = self.data[numPhases][patientID]
+        phaseArrs, dmapArr, segArr, bbox = handle()         # this is where we actually load data from disk
+        # ^^^ this is good because it lets torch handle pre-loading image with persistant workers
+
+        phaseTensors = torch.from_numpy(phaseArrs).to(DTYPE_PHASE)
+        phaseTensors = phaseTensors / phaseTensors.amax(dim=(1, 2, 3), keepdim=True)       # normalize each phase intensity here
+        dmapTensors  = torch.from_numpy(dmapArr).to(DTYPE_DMAP) if dmapArr is not None else None
+        segTensors   = torch.from_numpy(segArr).to(DTYPE_SEG)
+        phase, dmap, seg = DoTransforms(phaseTensors, 
+                                        dmapTensors, 
+                                        segTensors,
+                                        self.augment)
+        return phase, dmap, seg, bbox, patientID
     
 class CustomBatchSampler(BatchSampler):
     def __init__(self, dataSplit: dict, batchSize: int, shuffle: bool = False, dropLast: bool = False, seed=None):
@@ -75,13 +88,14 @@ class CustomBatchSampler(BatchSampler):
 def collate(x):
     return x
 
-def GetDataloaders(dataDir: str, patientDataPath: str, batchSize: int = 1, shuffle=True, test=False):
+def GetDataloaders(dataDir: str, patientDataPath: str, trAugCompose, vlTsAugCompose,
+                   batchSize: int = 1, shuffle=True, test=False):
     data = GetData(dataDir, patientDataPath, test=test)
 
-    def makeLoader(split: str):
-        dataset = CustomDataset(data=data[split])
+    def makeLoader(split: str, augmentCompose):
+        dataset = CustomDataset(data=data[split], augmentCompose=augmentCompose)
         sampler = CustomBatchSampler(data[split], batchSize=1 if split!="training" else batchSize, shuffle=shuffle)
         return torch.utils.data.DataLoader(dataset, batch_sampler=sampler, collate_fn=collate, 
-                                           num_workers=4, pin_memory=True, persistent_workers=True)
+                                           num_workers=min(batchSize, 12), pin_memory=True, persistent_workers=True)
 
-    return makeLoader("training"), makeLoader("validation"), makeLoader("testing")
+    return makeLoader("training", trAugCompose), makeLoader("validation", vlTsAugCompose), makeLoader("testing", vlTsAugCompose)

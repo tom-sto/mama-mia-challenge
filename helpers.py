@@ -13,6 +13,7 @@ DTYPE_SEG   = torch.bool
 DTYPE_DMAP  = torch.float32
 DTYPE_PHASE = torch.float32
 
+BOTTLENECK_TRANSFORMERTS = "TransformerTS"
 BOTTLENECK_TRANSFORMERST = "TransformerST"
 BOTTLENECK_CONV = "Conv"
 BOTTLENECK_NONE = "None"

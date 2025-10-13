@@ -7,9 +7,7 @@ import pandas as pd
 from functools import partial
 from itertools import product
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
-from helpers import ACQ_TIME_THRESHOLD, MIN_NUM_PHASES, DTYPE_DMAP, DTYPE_SEG, DTYPE_PHASE
-from Augmenter import DoTransforms
+from helpers import ACQ_TIME_THRESHOLD, MIN_NUM_PHASES
 
 @torch.jit.script
 def ExtractPatches(array: list[torch.Tensor], patch_indices: list[list[list[int]]], patch_size: int):
@@ -37,28 +35,6 @@ def ExtractPatches(array: list[torch.Tensor], patch_indices: list[list[list[int]
                 raise Exception(f"Cannot extract 3D patches from {arr.ndim}D tensor!")
         
     return patches
-
-def RunHandles(handles, augmentCompose):
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        results = list(executor.map(lambda h: h(), handles))
-
-    phaseArrs, dmapArr, segArr, bbox = zip(*results)
-    phases = []
-    dmaps = []
-    segs = []
-    for i in range(len(bbox)):
-        phaseTensors = torch.from_numpy(phaseArrs[i]).to(DTYPE_PHASE)
-        phaseTensors = phaseTensors / phaseTensors.amax(dim=(1, 2, 3), keepdim=True)       # normalize each phase intensity here
-        dmapTensors  = torch.from_numpy(dmapArr[i]).to(DTYPE_DMAP) if dmapArr[i] is not None else None
-        segTensors   = torch.from_numpy(segArr[i]).to(DTYPE_SEG)
-        phase, dmap, seg = DoTransforms(phaseTensors, 
-                                        dmapTensors, 
-                                        segTensors,
-                                        augmentCompose)
-        phases.append(phase)
-        dmaps.append(dmap)
-        segs.append(seg)
-    return phases, dmaps, segs, bbox
 
 ''' 
 data {

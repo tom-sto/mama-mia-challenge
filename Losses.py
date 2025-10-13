@@ -79,7 +79,7 @@ class DiceLoss(nn.Module):
         # E[Weighted Dice] = E[(p% * q% + q% * p%) * Dice]
         #                  = fgW * fgMask.mean() * E[Dice] + bgW * bgMask.mean() * E[Dice] 
         #                  = E[Dice] * 2 * fgW * bgW
-        normFactor = (1 / (fgW * bgW * 2))
+        normFactor = (1 / (fgW * bgW * 2)) if fgW.item() != 0 and bgW.item() != 0 else 1
 
         weighted = (fgMask * fgW + bgMask * bgW) * dice * normFactor
         return 1 - weighted.mean()
@@ -98,7 +98,7 @@ class SegLoss(nn.Module):
 
     # expect x shape: [B, N, 1, X, Y, Z]
     def forward(self, x: torch.Tensor, target: torch.Tensor, dmaps: torch.Tensor) -> tuple[torch.Tensor]:
-        bceLoss: torch.Tensor   = self.BCELoss(x, target.float())
+        bceLoss: torch.Tensor = self.BCELoss(x, target.float())
         
         # now we activate with sigmoid since these losses assume prob input
         x = torch.sigmoid(x)

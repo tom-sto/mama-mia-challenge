@@ -52,8 +52,6 @@ class PatchEncoder(nn.Module):
         _, E, X, Y, Z = x.shape
         assert X == Y == Z == 1, f"Expected spatial dims to reduce to 1, got {X} x {Y} x {Z}"
         x = x.reshape(B, T, N, E, X, Y, Z)
-        x = x.permute(0, 2, 4, 5, 6, 1, 3)      # [B, N, X, Y, Z, T, E] -> put N, X, Y, Z next to each other so they can be squished
-        x = x.reshape(B, -1, T, E)              # [B, N*X*Y*Z, T, E]
 
         if self.useSkips:
             return x, skips, (B, T, N, E, X, Y, Z)
