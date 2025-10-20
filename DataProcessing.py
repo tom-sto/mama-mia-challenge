@@ -206,6 +206,9 @@ def GetIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample:
             r1min, r1max = max(minFG[0] - patchSize // 2, 0), min(maxFG[0] - patchSize // 2, maxXYZ[0])
             r2min, r2max = max(minFG[1] - patchSize // 2, 0), min(maxFG[1] - patchSize // 2, maxXYZ[1])
             r3min, r3max = max(minFG[2] - patchSize // 2, 0), min(maxFG[2] - patchSize // 2, maxXYZ[2])
+            r1min = min(maxXYZ[0], r1min)
+            r2min = min(maxXYZ[1], r2min)
+            r3min = min(maxXYZ[2], r3min)
             start = [np.random.choice(range(r1min, max(r1min + 1, r1max))),
                      np.random.choice(range(r2min, max(r2min + 1, r2max))),
                      np.random.choice(range(r3min, max(r3min + 1, r3max)))]
