@@ -4,8 +4,8 @@ import torchio as tio
 def GetTrainingTransforms():
     transform = tio.Compose([
         tio.RandomAffine(scales=(0.8, 1.1), degrees=15, translation=(5, 5, 5), p=0.8),
-        tio.RandomGamma(log_gamma=(0.9, 1.1), p=0.5),
-        tio.RandomNoise(mean=0, std=0.01, p=0.5),
+        tio.RandomGamma(log_gamma=(0.7, 1.3), p=0.8),
+        tio.RandomNoise(mean=0, std=0.02, p=0.8),
     ])
     return transform
 

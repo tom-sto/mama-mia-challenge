@@ -3,3 +3,4 @@ torchio
 zarr
 pandas
 numba
+scikit-learn

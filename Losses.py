@@ -8,16 +8,17 @@ class PCRLoss(nn.Module):
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor):
         # Convert list to tensor if needed
-        if isinstance(targets, list):
+        if isinstance(targets, list) or isinstance(targets, tuple):
             targets = torch.tensor(targets, device=logits.device)
 
-        targets = targets.float()
+        # ignore missing pcr values
+        mask = targets != -1
 
         # Ensure logits and targets match in shape
         if logits.ndim == 2 and logits.shape[1] == 1:
             logits = logits.squeeze(1)  # shape (B,)
 
-        loss = self.bce(logits.float(), targets)
+        loss = self.bce(logits[mask].float(), targets[mask].float())
 
         return loss
     
@@ -85,12 +86,12 @@ class DiceLoss(nn.Module):
         return 1 - weighted.mean()
     
 class SegLoss(nn.Module):
-    def __init__(self, bcePosWeight: float):
+    def __init__(self, bcePosWeight: float, downsample: int):
         super().__init__()
 
-        self.DiceWeight = 1
-        self.BCEWeight  = 1
-        self.BDWeight   = 3e-2
+        self.DiceWeight = 3
+        self.BCEWeight  = 2
+        self.BDWeight   = 1 / downsample
 
         self.DiceLoss   = DiceLoss()
         self.BCELoss    = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(bcePosWeight))
@@ -130,3 +131,31 @@ def tp_fp_tn_fn(recon: torch.Tensor, target: torch.Tensor):
     fn = int(torch.sum(~r & t).item())
 
     return tp, fp, tn, fn
+
+def GetMetrics(tp, fp, tn, fn, suffix):
+    precision = tp / max(1, tp + fp)                # positive predictive value
+    recall = tp / max(1, tp + fn)                   # true positive rate / sensitivity
+    specificity = tn / max(1, tn + fp)              # true negative rate
+
+    f1 = 2 * precision * recall / max(1e-10, precision + recall)
+    iou = tp / max(1, tp + fp + fn)                 # intersection over union
+    acc = (tp + tn) / max(1, tp + tn + fp + fn)     # accuracy
+    bal_acc = (recall + specificity) / 2            # balanced accuracy
+    npv = tn / max(1, tn + fn)                      # negative predictive value
+    fpr = fp / max(1, fp + tn)                      # false positive rate
+    fnr = fn / max(1, fn + tp)                      # false negative rate
+
+    row = {
+        "TP": [tp], "FP": [fp], "TN": [tn], "FN": [fn],
+        "Sens": [recall], "Spec": [specificity],
+        "Acc": [acc],
+        "Prec": [precision],
+        "F1": [f1],
+        "IoU": [iou],
+        "Bal Acc": [bal_acc],
+        "NPV": [npv],
+        "FPR": [fpr],
+        "FNR": [fnr]
+    }
+    row = {k + f" ({suffix})": v for k, v in row.items()}
+    return row

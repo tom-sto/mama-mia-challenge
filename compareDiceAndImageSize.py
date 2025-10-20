@@ -4,19 +4,51 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 
+def stratified_mean(df: pd.DataFrame) -> pd.DataFrame:
+    def get_group(pid):
+        pid = str(pid).lower()
+        if pid.startswith("duke"):
+            return "duke"
+        elif pid.startswith("ispy1"):
+            return "ispy1"
+        elif pid.startswith("ispy2"):
+            return "ispy2"
+        elif pid.startswith("nact"):
+            return "nact"
+        else:
+            return "other"
+
+    df["group"] = df["Patient ID"].apply(get_group)
+
+    # 2. First aggregate per patient (mean across multiple rows for same patient)
+    patient_means = (
+        df.groupby(["Patient ID", "group"], as_index=False)[["Dice (Full Image)", "HD95"]]
+        .mean()
+    )
+
+    # 3. Then aggregate per group (mean across patients)
+    group_means = (
+        patient_means.groupby("group")[["Dice (Full Image)", "HD95"]]
+        .mean()
+        .reset_index()
+    )
+
+    return group_means
+
+
 x = ["Test Patches", "Test Whole Image", "Val Patches", "Val Whole Image"]
 x = ["Val Whole Image"]
-x = ["TransformerSTWithSkips", "ConvWithSkips"]
+x = ["TransformerSTWithSkips", "TransformerTSWithSkips"]
 for t in x:
     # Path settings
-    csv_path = rf"transformerResults\{t}\outputsExtraNegativeSampling-FixedDMapAndShuffleBestSeg\scores.csv"  # Update this to your actual CSV file
+    csv_path = rf"transformerResults\{t}\outputsOct15-IncreaseAugmentationAndDropoutBestSeg\scores.csv"  # Update this to your actual CSV file
     zarr_dir = rf"my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm\testing"
 
     # Load the CSV
     df = pd.read_csv(csv_path)
 
     # Keep only relevant columns
-    df = df[['Patient ID', 'Dice (Full Image)']].dropna()
+    df = df[['Patient ID', 'Dice (Full Image)', "HD95"]].dropna()
 
     # Prepare lists to store results
     image_sizes = []
@@ -67,6 +99,9 @@ for t in x:
     plt.tight_layout()
     plt.savefig(os.path.join(os.path.dirname(csv_path), "Dice vs Size.png"))
     plt.show()
+
+    result = stratified_mean(df)
+    print(result)
 
 # Optional: Save data to new CSV
 # output_df = pd.DataFrame({

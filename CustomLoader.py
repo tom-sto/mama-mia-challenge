@@ -2,7 +2,7 @@ import random
 import torch
 from DataProcessing import GetData
 from torch.utils.data import Dataset, BatchSampler
-from helpers import DTYPE_DMAP, DTYPE_SEG, DTYPE_PHASE
+from helpers import DTYPE_DMAP, DTYPE_SEG, DTYPE_PHASE, DTYPE_PCR
 from Augmenter import DoTransforms
 
 # need this to load and track training data along with dmap vectors
@@ -16,7 +16,7 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, ind: str):
         patientID, numPhases = ind
-        handle = self.data[numPhases][patientID]
+        handle, pcr = self.data[numPhases][patientID]
         phaseArrs, dmapArr, segArr, bbox = handle()         # this is where we actually load data from disk
         # ^^^ this is good because it lets torch handle pre-loading image with persistant workers
 
@@ -28,7 +28,8 @@ class CustomDataset(Dataset):
                                         dmapTensors, 
                                         segTensors,
                                         self.augment)
-        return phase, dmap, seg, bbox, patientID
+        pcr = torch.tensor(pcr).to(DTYPE_PCR)
+        return phase, dmap, seg, pcr, bbox, patientID
     
 class CustomBatchSampler(BatchSampler):
     def __init__(self, dataSplit: dict, batchSize: int, shuffle: bool = False, dropLast: bool = False, seed=None):
@@ -89,8 +90,8 @@ def collate(x):
     return x
 
 def GetDataloaders(dataDir: str, patientDataPath: str, trAugCompose, vlTsAugCompose,
-                   batchSize: int = 1, shuffle=True, test=False):
-    data = GetData(dataDir, patientDataPath, test=test)
+                   downsampleFactor: int = 1, batchSize: int = 1, shuffle=True, test=False):
+    data = GetData(dataDir, patientDataPath, downsampleFactor, test=test)
 
     def makeLoader(split: str, augmentCompose):
         dataset = CustomDataset(data=data[split], augmentCompose=augmentCompose)

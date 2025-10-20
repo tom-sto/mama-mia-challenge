@@ -12,6 +12,7 @@ MIN_NUM_PHASES = 3
 DTYPE_SEG   = torch.bool
 DTYPE_DMAP  = torch.float32
 DTYPE_PHASE = torch.float32
+DTYPE_PCR   = torch.int32
 
 BOTTLENECK_TRANSFORMERTS = "TransformerTS"
 BOTTLENECK_TRANSFORMERST = "TransformerST"

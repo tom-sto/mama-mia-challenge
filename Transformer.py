@@ -41,8 +41,8 @@ class MyTransformerTS(nn.Module):
             else torch.tensor([0, 0, 0, 1]) if x == "d" \
             else torch.tensor([0, 0, 0, 0])
 
-        tLayer = TransformerLayer(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=nHeads, dropout=0.08)
-        sLayer = TransformerLayer(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=nHeads, dropout=0.08)
+        tLayer = TransformerLayer(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=nHeads, dropout=0.15)
+        sLayer = TransformerLayer(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=nHeads, dropout=0.15)
 
         self.transformerT   = Transformer(tLayer, num_layers=nLayers)
         self.temporal_proj  = AttentionPooling(self.emb_dim + self.nPatientDataOutFeatures, nHeads)

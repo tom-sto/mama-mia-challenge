@@ -36,6 +36,11 @@ def ExtractPatches(array: list[torch.Tensor], patch_indices: list[list[list[int]
         
     return patches
 
+def Downsample(arr: np.ndarray, factor: int):
+    if factor == 1:
+        return arr
+    return arr[::factor, ::factor, ::factor]        # simple downsampling, no smoothing
+
 ''' 
 data {
     tr/val/ts: {                    ("training", "validation", "testing")
@@ -63,11 +68,11 @@ def defaultPhaseDict():
 def defaultSplitDict():
     return defaultdict(defaultPhaseDict)
 
-def GetData(parentDir: str, patientDataPath: str, test: bool = False):
+def GetData(parentDir: str, patientDataPath: str, downsampleFactor: int, test: bool = False):
     print("Collecting data...")
 
     # Load patient metadata once
-    df = pd.read_excel(patientDataPath, "dataset_info")[["patient_id", "acquisition_times"]]
+    df = pd.read_excel(patientDataPath, "dataset_info")[["patient_id", "acquisition_times", "pcr"]]
     np.random.seed(42)
 
     # Pickle-safe nested defaultdict
@@ -104,32 +109,22 @@ def GetData(parentDir: str, patientDataPath: str, test: bool = False):
             phases = sorted(glob.glob(os.path.join(trtsDir, f"{patient_id}_0*.zarr")))[:nPhases]
             dmap = os.path.join(trtsDir, f"{patient_id}_dmap.zarr")
             seg = os.path.join(trtsDir, f"{patient_id}_seg.zarr")
+            pcr = df[df["patient_id"] == patient_id.upper()]["pcr"].fillna(-1).iloc[0]
             
             bboxPath = os.path.join(trtsDir, f"{patient_id}_bbox.txt")
             # Read bounding box
             with open(bboxPath, 'r') as f:
                 bbox = eval(f.read().strip())
 
-            handle = partial(LoadImages, phases, dmap, seg, bbox)
+            handle = partial(LoadImages, phases, dmap, seg, bbox, downsampleFactor)
 
             # Load the image patches - I feel very clever for this approach ;)
             # Store partial function handles in a data structure
-            # and then run them only when I need them (making sure to delete the arrays after to save memory)
-            # return segImg handles, dmapImg handles, [phaseImg handles for p in nPhases] 
+            # and then run them in the dataloader (making sure to delete the arrays after to save memory)
             if (trts == "training" and np.random.random() < 0.9) or trts == "testing":
-                # handle1 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, oversample, bbox, False, oversampleRadius, trainingCompose)
-                # handle2 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, oversample, bbox, False, oversampleRadius, trainingCompose)
-                # handle3 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, -1, bbox, False, oversampleRadius, trainingCompose)
-                # handle4 = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, -1, bbox, False, oversampleRadius, trainingCompose)
-                
-                # handles = [handle1, handle2, handle3, handle4]
-
-                # Store data in the structure
-                data[trts][nPhases][patient_id] = handle
+                data[trts][nPhases][patient_id] = (handle, pcr)
             else:
-                # data["validation"][nPhases][patient_id] = partial(GetPatches, phaseZarrs, dmapZarr, segZarr, PATCH_SIZE, NUM_PATCHES, 
-                #                                                   0, bbox, True, oversampleRadius, valTestCompose)
-                data["validation"][nPhases][patient_id] = handle
+                data["validation"][nPhases][patient_id] = (handle, pcr)
 
     def countPatients(split_data: dict) -> int:
         return sum(len(patients) for patients in split_data.values())
@@ -140,17 +135,18 @@ def GetData(parentDir: str, patientDataPath: str, test: bool = False):
 
     return dict(data)  # Convert defaultdict to regular dict for return
 
-def LoadImages(phases, dmap, seg, bbox):
-    phaseZarrs  = np.stack([zarr.load(p) for p in phases])
-    dmapZarr    = zarr.load(dmap) if os.path.exists(dmap) else None
-    segZarr     = zarr.load(seg)
+def LoadImages(phases, dmap, seg, bbox, downsampleFactor):
+    phaseZarrs  = np.stack([Downsample(zarr.load(p), downsampleFactor) for p in phases])
+    dmapZarr    = Downsample(zarr.load(dmap), downsampleFactor) if os.path.exists(dmap) else None
+    segZarr     = Downsample(zarr.load(seg), downsampleFactor)
     return phaseZarrs, dmapZarr, segZarr, bbox
 
 def GetPatches(phases: list[torch.Tensor], dmap: list[torch.Tensor], seg: list[torch.Tensor], patchSize: int,
                numPatches: int, oversample: float, oversampleRadius: float, fgBox: tuple[list[int]], 
-               loadWholeImage: bool):
+               downsampleFactor: int, loadWholeImage: bool):
     patchIndices = [GetIndices(numPatches, patchSize, seg[i].shape, 
                               oversample=oversample, fgBox=bbox, 
+                              downsampleFactor=downsampleFactor,
                               loadWholeImage=loadWholeImage,
                               oversampleRadius=oversampleRadius)
                     for i, bbox in enumerate(fgBox)]
@@ -165,14 +161,11 @@ def GetPatches(phases: list[torch.Tensor], dmap: list[torch.Tensor], seg: list[t
     
     phaseImgs = ExtractPatches(phases, patchIndices, patchSize)
     
-    # TODO: Finish me!
-    pcrValues = torch.tensor([0])
-    
-    return phaseImgs, dmapImgs, segImgs, pcrValues, torch.tensor(patchIndices).int()
+    return phaseImgs, dmapImgs, segImgs, torch.tensor(patchIndices).int()
 
 # randomly sample N patches
 def GetIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample: float, fgBox: tuple[list[int]], loadWholeImage: bool,
-               shuffleFullImageIndices: bool = True, oversampleRadius: float = 0.25):
+               downsampleFactor: int, shuffleFullImageIndices: bool = True, oversampleRadius: float = 0.25):
     if loadWholeImage:
         pX, pY, pZ = GetFullImageIndices(imgShape, patchSize, minOverlap=patchSize // 4)
         indices = list(product(pX, pY, pZ))
@@ -183,6 +176,9 @@ def GetIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample:
     
     maxXYZ = [c - patchSize for c in imgShape]
     minFG, maxFG = fgBox
+    # adjust bounding box coordinates for on-the-fly downsampling
+    minFG = [round(c / downsampleFactor) for c in minFG]
+    maxFG = [round(c / downsampleFactor) for c in maxFG]
     indices = []
     oversampleThreshold = np.clip(np.random.normal(oversample, oversampleRadius), 0, 1)
     for _ in range(numPatches):
@@ -207,12 +203,12 @@ def GetIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample:
                          np.random.choice(validZ)]
         elif np.random.rand() < oversampleThreshold:
             # sample the start index from foreground box, but make sure we don't go out of bounds
-            r1 = range(max(minFG[0] - patchSize // 2, 0), min(maxFG[0] - patchSize // 2, maxXYZ[0]))
-            r2 = range(max(minFG[1] - patchSize // 2, 0), min(maxFG[1] - patchSize // 2, maxXYZ[1]))
-            r3 = range(max(minFG[2] - patchSize // 2, 0), min(maxFG[2] - patchSize // 2, maxXYZ[2]))
-            start = [np.random.choice(r1),
-                     np.random.choice(r2),
-                     np.random.choice(r3)]
+            r1min, r1max = max(minFG[0] - patchSize // 2, 0), min(maxFG[0] - patchSize // 2, maxXYZ[0])
+            r2min, r2max = max(minFG[1] - patchSize // 2, 0), min(maxFG[1] - patchSize // 2, maxXYZ[1])
+            r3min, r3max = max(minFG[2] - patchSize // 2, 0), min(maxFG[2] - patchSize // 2, maxXYZ[2])
+            start = [np.random.choice(range(r1min, max(r1min + 1, r1max))),
+                     np.random.choice(range(r2min, max(r2min + 1, r2max))),
+                     np.random.choice(range(r3min, max(r3min + 1, r3max)))]
         else:
             start = [np.random.choice(range(maxXYZ[0])),
                      np.random.choice(range(maxXYZ[1])),
