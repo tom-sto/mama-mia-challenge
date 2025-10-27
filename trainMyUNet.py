@@ -1,5 +1,6 @@
 import torch
 import os
+import numpy as np
 import matplotlib.pyplot as plt
 import SimpleITK as sitk
 from time import time
@@ -16,21 +17,23 @@ from helpers import *
 from Augmenter import GetNoTransforms, GetTrainingTransforms
 
 class MyTrainer():
-    def __init__(self, nEpochs: int, modelName: str = "", tag: str = "", joint: bool = True, test: bool = False,
-                 patientDataPath="clinical_and_imaging_info.xlsx"):
+    def __init__(self, nEpochs: int, modelName: str = "", tag: str = "", joint: bool = True, stopEarly: int = None, 
+                 useJD: bool = False, patientDataPath="clinical_and_imaging_info.xlsx", test: bool = False):
         self.nEpochs = nEpochs
-        self.stopAfterPlateauEpochs = 40
+        self.stopAfterPlateauEpochs = stopEarly if stopEarly else 10_000_000
         self.joint = joint
+        self.useJD = useJD
         
         # Parameters to change!
         self.pretrainSegmentation = self.nEpochs * 0.5
+        # self.pretrainSegmentation = 0
         self.peakLR = 1e-5
         self.minLR = 1e-8
         self.currentEpoch = 0
         self.oversampleFG = 0.2
         self.oversampleRadius = 0.2
         self.batchSize = 4
-        self.clipGrad = True
+        self.clipGrad = False
         self.downsample = 2
 
         self.trainingCompose = GetTrainingTransforms()
@@ -61,6 +64,7 @@ class MyTrainer():
 
         self.device = device
         nHeads = 16
+        nBottleneckLayers = 10
 
         self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
                             expectedChannels=[1, 64, 128, 256, 384, 576],
@@ -71,7 +75,7 @@ class MyTrainer():
                             useSkips=useSkips,
                             joint=self.joint,
                             bottleneck=bottleneck,
-                            nBottleneckLayers=6).to(device)
+                            nBottleneckLayers=nBottleneckLayers).to(device)
 
         dataTime = time()
         self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, self.patientDataPath, self.trainingCompose, self.valTestCompose,
@@ -81,13 +85,13 @@ class MyTrainer():
         # change optimizer and scheduler
         decoderLRWeight = 50
         if pretrainedDecoderPath:
-            decoderLRWeight = 0.01
+            decoderLRWeight = 0.1
         
         self.optimizer = torch.optim.AdamW([
             {'params': self.model.encoder.parameters(), 'lr': self.minLR * 50, 'weight_decay': 1e-4},
-            {'params': self.model.bottleneck.parameters(), 'lr': self.minLR, 'weight_decay': 1e-4},
+            {'params': self.model.bottleneck.parameters(), 'lr': self.minLR, 'weight_decay': 1e-5},
             {'params': self.model.decoder.parameters(), 'lr': self.minLR * decoderLRWeight,  'weight_decay': 1e-4},
-            {'params': self.model.classifier.parameters(), 'lr': self.minLR * 100,  'weight_decay': 1e-4}
+            {'params': self.model.classifier.parameters(), 'lr': self.minLR * 10,  'weight_decay': 1e-3}
         ])
         # self.optimizer = torch.optim.AdamW(params=self.model.parameters(), lr=self.minLR, weight_decay=1e-4)
 
@@ -113,12 +117,12 @@ class MyTrainer():
         # bce pos_weight should be close to the ratio of background to foreground in segmentations
         # since we oversample, we know some percentage of patches will have foreground
         # we don't know how much foreground though, since we sample randomly on the bounding box
-        # so we guess that around 50% of each oversampled patch is foreground. -> self.oversampleFG * 0.5
+        # so we guess that around 40% of each oversampled patch is foreground. -> self.oversampleFG * 0.4
         #       (From looking at samples in the debugger, 20% is not a bad guess)
         # If we dont oversample, then the average ratio of background to foreground is used
         # (i don't actually know this number rn, so again just guess that ~10% voxels are foreground)
         # So otherwise, posWeight = 90% / 10% = 9
-        bcePosWeight = min(1 / (self.oversampleFG * 0.5) - 1, 10.0) if self.oversampleFG != 0 else 9
+        bcePosWeight = min(1 / (self.oversampleFG * 0.4) - 1, 15) if self.oversampleFG != 0 else 9
         self.SegLoss = SegLoss(bcePosWeight=bcePosWeight, downsample=self.downsample)
 
     def train(self, continueTraining: bool = False, modelName: str = None):
@@ -215,17 +219,21 @@ class MyTrainer():
                     del segOut, pcrOut, target, bceLoss, diceLoss, bdLoss
                     
                     self.optimizer.zero_grad()
-                    if self.joint and pcrLoss:
-                        assert sharedFeatures is not None, "Cannot do joint backward without shared features!"
-                        pcrLossesThisEpoch.append(pcrLoss.item())
+                    if self.joint and pcrLoss and not pcrLoss.isnan().any():
+                        if self.useJD:
+                            assert sharedFeatures is not None, "Cannot do joint backward without shared features!"
+                            pcrLossesThisEpoch.append(pcrLoss.item())
 
-                        losses = self.gradScaler.scale([segLoss, pcrLoss])
-                        mtl_backward(losses=losses, 
-                                    features=sharedFeatures, 
-                                    aggregator=self.aggregator,
-                                    tasks_params=[list(self.model.decoder.parameters()), 
-                                                  list(self.model.classifier.parameters())],
-                                    shared_params=list(self.model.encoder.parameters()) + list(self.model.bottleneck.parameters()))
+                            losses = self.gradScaler.scale([segLoss, pcrLoss])
+                            mtl_backward(losses=losses, 
+                                        features=sharedFeatures, 
+                                        aggregator=self.aggregator,
+                                        tasks_params=[list(self.model.decoder.parameters()), 
+                                                    list(self.model.classifier.parameters())],
+                                        shared_params=list(self.model.encoder.parameters()) + list(self.model.bottleneck.parameters()))
+                        else:
+                            scaledLoss = self.gradScaler.scale(segLoss + pcrLoss)
+                            scaledLoss.backward()
                     else:
                         scaledLoss = self.gradScaler.scale(segLoss)
                         scaledLoss.backward()
@@ -344,7 +352,7 @@ class MyTrainer():
                 sensVal.append(Mean(sens))
                 specVal.append(Mean(spec))
 
-                if self.joint and pcrLoss is not None:
+                if self.joint and pcrLoss is not None and not pcrLoss.isnan().any():
                     pcrLossesVal.append(pcrLoss.item())
 
                 del segOut, pcrOut, target, patchIndices, bceLoss, diceLoss, bdLoss, segLoss, pcrLoss, mris, dmap, seg, pcr
@@ -355,7 +363,17 @@ class MyTrainer():
             auc = None
             if self.joint and self.currentEpoch >= self.pretrainSegmentation:
                 predPCRs = torch.cat(predPCRs).tolist()
-                auc = roc_auc_score(truePCRs, predPCRs)
+                # Convert to numpy arrays (if they aren’t already)
+                truePCRs = np.array(truePCRs)
+                predPCRs = np.array(predPCRs)
+
+                # Mask out invalid entries
+                mask = truePCRs != -1
+                truePCRs_masked = truePCRs[mask]
+                predPCRs_masked = predPCRs[mask]
+
+                # Now compute AUC only on valid entries
+                auc = roc_auc_score(truePCRs_masked, predPCRs_masked)
 
             # MODEL CHECKPOINTING
             if self.writer:
@@ -401,7 +419,7 @@ class MyTrainer():
                         print(f"Saving Best Joint: epoch {self.currentEpoch}")
                         self.saveModel(f"BestJoint{self.tag}")
 
-            if self.currentEpoch % 5 == 0:
+            if self.currentEpoch % 5 == 0 or (self.joint and self.currentEpoch == self.pretrainSegmentation - 1):
                 self.saveModel()
 
             if self.joint and self.currentEpoch >= self.pretrainSegmentation and self.currentEpoch - bestJointEpoch >= self.stopAfterPlateauEpochs:
@@ -519,7 +537,15 @@ class MyTrainer():
                 print(f"Finished patient {patientID}\tDice: {dice:.4f}\tHausdorff 95: {hausdorff:.4f}", end="\r")
         print()
         if self.joint:
-            auc = roc_auc_score(scoreDF["PCR True"], scoreDF["PCR Pred"])
+                        # Convert to numpy arrays (if they aren’t already)
+            truePCRs = np.array(scoreDF["PCR True"])
+            predPCRs = np.array(scoreDF["PCR Pred"])
+
+            # Mask out invalid entries
+            mask = truePCRs != -1
+            truePCRs_masked = truePCRs[mask]
+            predPCRs_masked = predPCRs[mask]
+            auc = roc_auc_score(truePCRs_masked, predPCRs_masked)
             scoreDF["AUC"] = auc
 
         savePath = os.path.join(self.outputFolder, resultsFolder, "scores.csv")
@@ -583,27 +609,37 @@ class MyTrainer():
     
     def loadModel(self, modelName: str):
         stateDict = torch.load(os.path.join(self.outputFolder, modelName))
-        self.model.load_state_dict(stateDict["networkWeights"])
+        sd: dict[str, torch.Tensor] = stateDict["networkWeights"]
+        ksToDelete = [k for k in sd.keys() if "bottleneck.patientDataEmbed" in k]
+        for k in ksToDelete:
+            v = sd[k]
+            ks = k.split('.')
+            ks.insert(1, "patientDataMod")
+            sd['.'.join(ks)] = v
+            del sd[k]
+        self.model.load_state_dict(sd)
         self.optimizer.load_state_dict(stateDict["optimizerState"])
         self.gradScaler.load_state_dict(stateDict["gradScalerState"])
         self.LRScheduler.load_state_dict(stateDict["schedulerState"])
-        self.currentEpoch = stateDict["epoch"]
+        self.currentEpoch = stateDict["epoch"] + 1
 
 if __name__ == "__main__":
     writer = SummaryWriter()
     datasetName = "Dataset106_cropped_Xch_breast_no_norm"
     # dataDir = rf"F:\MAMA-MIA\my_preprocessed_data\{datasetName}"
     dataDir = rf"{os.environ.get("MAMAMIA_DATA")}/my_preprocessed_data/{datasetName}"
-    # pretrainedDecoderPath = "pretrained_weights/nnunet_pretrained_weights_64_best.pth"
-    pretrainedDecoderPath = None
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    pretrainedDecoderPath = r"transformerResults\TransformerTSJointWithSkips\BestSegOct20-DownsampleImages.pth"
+    # pretrainedDecoderPath = None
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    tag = "Oct20-DownsampleImages"
-    bottleneck = BOTTLENECK_TRANSFORMERTS
+    tag = "Oct26-DownsampleImagesWithPCRNoJD"
+    # tag = "Oct20-DownsampleImages"
+    bottleneck = BOTTLENECK_SPATIOTEMPORAL
+    # bottleneck = BOTTLENECK_TRANSFORMERTS
     # bottleneck = BOTTLENECK_TRANSFORMERST
     # bottleneck = BOTTLENECK_CONV
     skips = True
-    joint = False
+    joint = True
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
     trainer = MyTrainer(nEpochs=200, modelName=modelName, tag=tag, joint=joint, test=test)
@@ -615,7 +651,7 @@ if __name__ == "__main__":
                   bottleneck=bottleneck)
     print(f"Set up model {modelName}")
 
-    # trainer.train(continueTraining=True, modelName=f"LatestExtraNegativeSampling-FixedDMapAndShuffle.pth")
+    # trainer.train(continueTraining=True, modelName=f"Latest{tag}.pth")
     trainer.train()
     # trainer.inference(f"Latest{tag}.pth", "Latest")
     if joint:

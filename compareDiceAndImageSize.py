@@ -35,13 +35,13 @@ def stratified_mean(df: pd.DataFrame) -> pd.DataFrame:
 
     return group_means
 
-
+modelTag = "Oct20-DownsampleImages"
 x = ["Test Patches", "Test Whole Image", "Val Patches", "Val Whole Image"]
 x = ["Val Whole Image"]
-x = ["TransformerSTWithSkips", "TransformerTSWithSkips"]
+x = ["TransformerTSWithSkips"]
 for t in x:
     # Path settings
-    csv_path = rf"transformerResults\{t}\outputsOct15-IncreaseAugmentationAndDropoutBestSeg\scores.csv"  # Update this to your actual CSV file
+    csv_path = rf"transformerResults\{t}\outputs{modelTag}BestSeg\scores.csv"  # Update this to your actual CSV file
     zarr_dir = rf"my_preprocessed_data\Dataset106_cropped_Xch_breast_no_norm\testing"
 
     # Load the CSV

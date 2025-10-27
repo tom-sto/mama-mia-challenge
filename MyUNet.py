@@ -1,5 +1,5 @@
 import torch
-from Transformer import MyTransformerTS, MyTransformerST
+from Transformer import MyTransformerTS, MyTransformerST, MySpatioTemporalTransformer
 from Bottleneck import *
 from PCRClassifier import ClassifierHead
 from PatchEmbed import PatchEncoder, PatchDecoder
@@ -25,7 +25,7 @@ class MyUNet(torch.nn.Module):
         self.poolSkips = AttentionPooling(expectedChannels[-1], nHeads)
         
         if pretrainedDecoderPath is not None:
-            stateDict: dict = torch.load(pretrainedDecoderPath, map_location='cpu', weights_only=False)['network_weights']
+            stateDict: dict = torch.load(pretrainedDecoderPath, map_location='cpu', weights_only=False)['networkWeights']
 
             # Load only decoder weights
             decoderStateDict = {k.replace("decoder.", ""): v for k, v in stateDict.items() if "decoder" in k}
@@ -37,6 +37,8 @@ class MyUNet(torch.nn.Module):
                 self.bottleneck = MyTransformerTS(expectedPatchSize, expectedChannels, nHeads, nBottleneckLayers, patientDataPath)
             case helpers.BOTTLENECK_TRANSFORMERST:
                 self.bottleneck = MyTransformerST(expectedPatchSize, expectedChannels, nHeads, nBottleneckLayers, patientDataPath)
+            case helpers.BOTTLENECK_SPATIOTEMPORAL:
+                self.bottleneck = MySpatioTemporalTransformer(expectedPatchSize, expectedChannels, nHeads, nBottleneckLayers, patientDataPath)
             
             # TODO: Implement PCR with these bottlenecks
             case helpers.BOTTLENECK_CONV:

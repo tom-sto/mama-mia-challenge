@@ -18,7 +18,7 @@ class PCRLoss(nn.Module):
         if logits.ndim == 2 and logits.shape[1] == 1:
             logits = logits.squeeze(1)  # shape (B,)
 
-        loss = self.bce(logits[mask].float(), targets[mask].float())
+        loss: torch.Tensor = self.bce(logits[mask].float(), targets[mask].float())
 
         return loss
     
