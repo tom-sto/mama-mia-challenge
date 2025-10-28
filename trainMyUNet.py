@@ -9,7 +9,7 @@ from torchjd.aggregation import UPGrad
 from torchjd import mtl_backward
 from sklearn.metrics import roc_auc_score
 from MyUNet import MyUNet
-from Losses import PCRLoss, SegLoss, Dice, tp_fp_tn_fn, GetMetrics
+from Losses import PCRLoss, PCRLossWithConfidence, SegLoss, Dice, tp_fp_tn_fn, GetMetrics
 from Schedulers import WarmupCosineAnnealingWithRestarts
 from CustomLoader import GetDataloaders
 from DataProcessing import ReconstructImageFromPatches, GetPatches
@@ -27,6 +27,7 @@ class MyTrainer():
         # Parameters to change!
         self.pretrainSegmentation = self.nEpochs * 0.5
         # self.pretrainSegmentation = 0
+        self.pcrConfidence = True
         self.peakLR = 1e-5
         self.minLR = 1e-8
         self.currentEpoch = 0
@@ -74,6 +75,7 @@ class MyTrainer():
                             nHeads=nHeads,
                             useSkips=useSkips,
                             joint=self.joint,
+                            pcrConfidence=self.pcrConfidence,
                             bottleneck=bottleneck,
                             nBottleneckLayers=nBottleneckLayers).to(device)
 
@@ -112,7 +114,7 @@ class MyTrainer():
             damping=0.5
         )
 
-        self.PCRloss = PCRLoss()
+        self.PCRloss = PCRLoss() if not self.pcrConfidence else PCRLossWithConfidence()
 
         # bce pos_weight should be close to the ratio of background to foreground in segmentations
         # since we oversample, we know some percentage of patches will have foreground
@@ -169,7 +171,7 @@ class MyTrainer():
             nBatches = len(self.trDataloader)
 
             # iterations = ["oversample", "oversample", "oversample", "no tumor", "no tumor", "no tumor"]
-            iterations = ["oversample", "oversample", "oversample", "no tumor"]
+            iterations = ["oversample", "oversample", "oversample", "no tumor", "no tumor"]
             nHandles = len(iterations)
             for idx, struct in enumerate(self.trDataloader):        # iterate over patient cases
                 mris, dmap, seg, pcr, bbox, patientIDs = zip(*struct)
@@ -305,10 +307,13 @@ class MyTrainer():
                         pcrLoss = None
 
                         allOuts.append(segOut.detach().cpu())
-                        # TODO: Figure this out later
                         if self.currentEpoch >= self.pretrainSegmentation and pcrOut is not None and self.joint:
                             pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
-                            allPCRs.append(pcrOut.squeeze(dim=-1).detach().cpu())
+                            if self.pcrConfidence:
+                                allPCRs.append((torch.sigmoid(pcrOut[0]) * torch.sigmoid(pcrOut[1])).squeeze(dim=-1).detach().cpu())
+                            else:
+                                allPCRs.append(pcrOut.squeeze(dim=-1).detach().cpu())
+                            
 
                         del segOut
                 
@@ -489,7 +494,10 @@ class MyTrainer():
                     x: torch.Tensor = self.model(phases[:, :, startI:stopI], patientIDs, patchIndices[:, startI:stopI])
                     if self.joint:
                         segOut, _, pcrOut = x
-                        allPCRs.append(pcrOut.detach().cpu())
+                        if self.pcrConfidence:
+                            allPCRs.append((torch.sigmoid(pcrOut[0]) * torch.sigmoid(pcrOut[1])).squeeze(dim=-1).detach().cpu())
+                        else:
+                            allPCRs.append(pcrOut.squeeze(dim=-1).detach().cpu())
                         del pcrOut
                     else:
                         segOut = x
@@ -630,9 +638,9 @@ if __name__ == "__main__":
     dataDir = rf"{os.environ.get("MAMAMIA_DATA")}/my_preprocessed_data/{datasetName}"
     pretrainedDecoderPath = r"transformerResults\TransformerTSJointWithSkips\BestSegOct20-DownsampleImages.pth"
     # pretrainedDecoderPath = None
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    tag = "Oct26-DownsampleImagesWithPCRNoJD"
+    tag = "Oct28-DownsamplePoolPCRChunks"
     # tag = "Oct20-DownsampleImages"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS

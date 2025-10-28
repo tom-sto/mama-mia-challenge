@@ -22,6 +22,32 @@ class PCRLoss(nn.Module):
 
         return loss
     
+class PCRLossWithConfidence(nn.Module):
+    def __init__(self, pos_weight=2.4):
+        super().__init__()
+        self.bce = nn.BCEWithLogitsLoss(reduction="none", pos_weight=torch.tensor(pos_weight))
+
+    def forward(self, logits: tuple[torch.Tensor], targets: torch.Tensor):
+        # logits, conf_logits: (B,1), targets: (B,)
+        logits, confLogits = logits[0], logits[1]
+        if isinstance(targets, (list, tuple)):
+            targets = torch.tensor(targets, device=logits.device)
+
+        mask = targets != -1
+        logits = logits[mask].float()
+        confLogits = confLogits[mask].float()
+        targets = targets[mask].float()
+
+        # BCE per chunk
+        lossPerChunk = self.bce(logits, targets)
+
+        # Confidence weights (0-1)
+        weights = torch.sigmoid(confLogits).squeeze(1)
+
+        # Weighted mean
+        loss = (lossPerChunk * weights).sum() / (weights.sum() + 1e-6)
+        return loss
+    
 class BoundaryLoss(nn.Module):
     def __init__(self, reduction: str = 'mean', class_idx: int = 1):
         super(BoundaryLoss, self).__init__()

@@ -1,7 +1,7 @@
 import torch
 from Transformer import MyTransformerTS, MyTransformerST, MySpatioTemporalTransformer
 from Bottleneck import *
-from PCRClassifier import ClassifierHead
+from PCRClassifier import ClassifierHead, ClassifierHeadWithConfidence
 from PatchEmbed import PatchEncoder, PatchDecoder
 from AttentionPooling import AttentionPooling
 import helpers
@@ -16,6 +16,7 @@ class MyUNet(torch.nn.Module):
                  nHeads: int = 8,
                  useSkips: bool = True,
                  joint: bool = True,
+                 pcrConfidence: bool = False,
                  bottleneck: str = "TransformerST",
                  nBottleneckLayers: int = 4):
         super().__init__()
@@ -46,7 +47,7 @@ class MyUNet(torch.nn.Module):
             case helpers.BOTTLENECK_NONE | _:
                 self.bottleneck = NoBottleneck(expectedChannels[-1], nHeads)
 
-        self.classifier = ClassifierHead(dim=expectedChannels[-1])
+        self.classifier = ClassifierHead(dim=expectedChannels[-1]) if not pcrConfidence else ClassifierHeadWithConfidence(dim=expectedChannels[-1])
         self.ret = "all" if joint else "seg"
 
     def forward(self, x: torch.Tensor, patientIDs: list[str], patchIdxs: torch.Tensor, patientData: list = None):
@@ -66,14 +67,14 @@ class MyUNet(torch.nn.Module):
         elif self.ret == "segOnly":
             return segOut
 
-        pcrOut = self.classifier(pcrToken)
+        pcrOut: tuple[torch.Tensor] = self.classifier(pcrToken)
 
         if self.ret == "all":
             return segOut, sharedFeatures, pcrOut
         elif self.ret == "prob":
-            return None, None, torch.sigmoid(pcrOut)
+            return None, None, torch.sigmoid(pcrOut[0]) * torch.sigmoid(pcrOut[1])
         elif self.ret == "probOnly":
-            return torch.sigmoid(pcrOut)
+            return torch.sigmoid(pcrOut) * torch.sigmoid(pcrOut[1])
         return
     
 if __name__ == "__main__":
