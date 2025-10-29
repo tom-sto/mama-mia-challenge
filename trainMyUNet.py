@@ -27,13 +27,13 @@ class MyTrainer():
         # Parameters to change!
         self.pretrainSegmentation = self.nEpochs * 0.5
         # self.pretrainSegmentation = 0
-        self.pcrConfidence = True
+        self.pcrConfidence = False
         self.peakLR = 1e-5
         self.minLR = 1e-8
         self.currentEpoch = 0
         self.oversampleFG = 0.2
         self.oversampleRadius = 0.2
-        self.batchSize = 4
+        self.batchSize = 2
         self.clipGrad = False
         self.downsample = 2
 
@@ -65,7 +65,7 @@ class MyTrainer():
 
         self.device = device
         nHeads = 16
-        nBottleneckLayers = 10
+        nBottleneckLayers = 12
 
         self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
                             expectedChannels=[1, 64, 128, 256, 384, 576],
@@ -495,9 +495,9 @@ class MyTrainer():
                     if self.joint:
                         segOut, _, pcrOut = x
                         if self.pcrConfidence:
-                            allPCRs.append((torch.sigmoid(pcrOut[0]) * torch.sigmoid(pcrOut[1])).squeeze(dim=-1).detach().cpu())
+                            allPCRs.append((torch.sigmoid(pcrOut[0]) * torch.sigmoid(pcrOut[1])).detach().cpu())
                         else:
-                            allPCRs.append(pcrOut.squeeze(dim=-1).detach().cpu())
+                            allPCRs.append(pcrOut.detach().cpu())
                         del pcrOut
                     else:
                         segOut = x
@@ -506,8 +506,8 @@ class MyTrainer():
             
             segOut = torch.cat(allOuts, dim=1)
             if self.joint:
-                pcrOut = torch.cat(allPCRs, dim=1)
-                pcrOut = pcrOut.mean(dim=1)
+                pcrOut = torch.cat(allPCRs, dim=-1)
+                pcrOut = pcrOut.mean(dim=-1)
 
             patchIndices = patchIndices.detach().cpu()
             for i, patientID in enumerate(patientIDs):
@@ -640,8 +640,8 @@ if __name__ == "__main__":
     # pretrainedDecoderPath = None
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    tag = "Oct28-DownsamplePoolPCRChunks"
-    # tag = "Oct20-DownsampleImages"
+    tag = "Oct29-DownsamplePoolPCRChunks"
+    # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS
     # bottleneck = BOTTLENECK_TRANSFORMERST
@@ -650,7 +650,7 @@ if __name__ == "__main__":
     joint = True
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=200, modelName=modelName, tag=tag, joint=joint, test=test)
+    trainer = MyTrainer(nEpochs=200, modelName=modelName, tag=tag, joint=joint, useJD=True, test=test)
     
     trainer.setup(dataDir, 
                   device, 
