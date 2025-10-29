@@ -124,7 +124,7 @@ class MyTrainer():
         # If we dont oversample, then the average ratio of background to foreground is used
         # (i don't actually know this number rn, so again just guess that ~10% voxels are foreground)
         # So otherwise, posWeight = 90% / 10% = 9
-        bcePosWeight = min(1 / (self.oversampleFG * 0.4) - 1, 15) if self.oversampleFG != 0 else 9
+        bcePosWeight = min(1 / (self.oversampleFG * 0.3) - 1, 15) if self.oversampleFG != 0 else 9
         self.SegLoss = SegLoss(bcePosWeight=bcePosWeight, downsample=self.downsample)
 
     def train(self, continueTraining: bool = False, modelName: str = None):
@@ -310,7 +310,7 @@ class MyTrainer():
                         if self.currentEpoch >= self.pretrainSegmentation and pcrOut is not None and self.joint:
                             pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
                             if self.pcrConfidence:
-                                allPCRs.append((torch.sigmoid(pcrOut[0]) * torch.sigmoid(pcrOut[1])).squeeze(dim=-1).detach().cpu())
+                                allPCRs.append((torch.sigmoid(pcrOut[0] * torch.sigmoid(pcrOut[1]))).squeeze(dim=-1).detach().cpu())
                             else:
                                 allPCRs.append(pcrOut.squeeze(dim=-1).detach().cpu())
                             
@@ -497,7 +497,7 @@ class MyTrainer():
                         if self.pcrConfidence:
                             allPCRs.append((torch.sigmoid(pcrOut[0]) * torch.sigmoid(pcrOut[1])).detach().cpu())
                         else:
-                            allPCRs.append(pcrOut.detach().cpu())
+                            allPCRs.append(torch.sigmoid(pcrOut).detach().cpu())
                         del pcrOut
                     else:
                         segOut = x
@@ -640,7 +640,7 @@ if __name__ == "__main__":
     # pretrainedDecoderPath = None
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    tag = "Oct29-DownsamplePoolPCRChunks"
+    tag = "Oct29-DownsampleWithMoreLayers"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS

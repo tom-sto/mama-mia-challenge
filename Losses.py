@@ -28,21 +28,21 @@ class PCRLossWithConfidence(nn.Module):
         self.bce = nn.BCEWithLogitsLoss(reduction="none", pos_weight=torch.tensor(pos_weight))
 
     def forward(self, logits: tuple[torch.Tensor], targets: torch.Tensor):
-        # logits, conf_logits: (B,1), targets: (B,)
-        logits, confLogits = logits[0], logits[1]
+        # logits, confProb: (B,1), targets: (B,)
+        logits, confProb = logits[0], logits[1]
         if isinstance(targets, (list, tuple)):
             targets = torch.tensor(targets, device=logits.device)
 
         mask = targets != -1
         logits = logits[mask].float()
-        confLogits = confLogits[mask].float()
+        confProb = confProb[mask].float()
         targets = targets[mask].float()
 
         # BCE per chunk
         lossPerChunk = self.bce(logits, targets)
 
         # Confidence weights (0-1)
-        weights = torch.sigmoid(confLogits).squeeze(1)
+        weights = confProb.squeeze(1)
 
         # Weighted mean
         loss = (lossPerChunk * weights).sum() / (weights.sum() + 1e-6)
