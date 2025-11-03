@@ -5,6 +5,7 @@ from PCRClassifier import ClassifierHead, ClassifierHeadWithConfidence
 from PatchEmbed import PatchEncoder, PatchDecoder
 from AttentionPooling import AttentionPooling
 import helpers
+from Encodings import PositionEncoding3D
 
 class MyUNet(torch.nn.Module):
     def __init__(self, 
@@ -54,12 +55,14 @@ class MyUNet(torch.nn.Module):
         x, skips, shape = self.encoder(x)
         B, N = shape[0], shape[2]
 
-        x = self.bottleneck(x, shape, patientIDs, patchIdxs)
-        if "seg" not in self.ret or "Transformer" in self.bottleneckType:
-            sharedFeatures, pcrToken = x    # unpack cls if our bottleneck allows
-            x: torch.Tensor = sharedFeatures
+        sharedFeatures: torch.Tensor = self.bottleneck(x, shape, patientIDs, patchIdxs)    # [B, E]
+        E = sharedFeatures.shape[-1]
+        pcrOut: torch.Tensor = self.classifier(sharedFeatures)       # [B, 1]
 
-        segOut: torch.Tensor = self.decoder(x.reshape(-1, *x.shape[2:]), skips)
+        posEnc = PositionEncoding3D(patchIdxs, dim=E)     # [B, N, E]
+        x = posEnc + sharedFeatures.unsqueeze(1).repeat(1, N, 1)        # TODO: maybe concat instead
+        x = x.reshape(-1, E)[..., None, None, None]            # [B*N, E, 1, 1, 1]
+        segOut: torch.Tensor = self.decoder(x, skips)
         segOut = segOut.reshape(B, N, *segOut.shape[-3:])
 
         if self.ret == "seg":
@@ -67,14 +70,12 @@ class MyUNet(torch.nn.Module):
         elif self.ret == "segOnly":
             return segOut
 
-        pcrOut: tuple[torch.Tensor] = self.classifier(pcrToken)
-
         if self.ret == "all":
             return segOut, sharedFeatures, pcrOut
         elif self.ret == "prob":
-            return None, None, torch.sigmoid(pcrOut[0]) * torch.sigmoid(pcrOut[1])
+            return None, None, torch.sigmoid(pcrOut)
         elif self.ret == "probOnly":
-            return torch.sigmoid(pcrOut) * torch.sigmoid(pcrOut[1])
+            return torch.sigmoid(pcrOut)
         return
     
 if __name__ == "__main__":

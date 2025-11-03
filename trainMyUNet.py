@@ -25,7 +25,9 @@ class MyTrainer():
         self.useJD = useJD
         
         # Parameters to change!
-        self.pretrainSegmentation = self.nEpochs * 0.5
+        self.warmup = 0.05
+        self.cycles = 2
+        self.pretrainSegmentation = self.nEpochs * (1/self.cycles + self.warmup)        # pretrain for first LR annealing cycle
         # self.pretrainSegmentation = 0
         self.pcrConfidence = False
         self.peakLR = 1e-5
@@ -33,7 +35,7 @@ class MyTrainer():
         self.currentEpoch = 0
         self.oversampleFG = 0.2
         self.oversampleRadius = 0.2
-        self.batchSize = 2
+        self.batchSize = 4
         self.clipGrad = False
         self.downsample = 2
 
@@ -100,10 +102,8 @@ class MyTrainer():
         self.gradScaler = torch.GradScaler(device.type)
         self.aggregator = UPGrad()
 
-        warmupPercent = 0.05
-        nCycles = 2
-        nWarmupSteps = round(warmupPercent * self.nEpochs)
-        nCycleSteps = round((1 - warmupPercent) * self.nEpochs / nCycles) + 1
+        nWarmupSteps = round(self.warmup * self.nEpochs)
+        nCycleSteps = round((1 - self.warmup) * self.nEpochs / self.cycles) + 1
 
         self.LRScheduler = WarmupCosineAnnealingWithRestarts(
             self.optimizer,
@@ -636,21 +636,21 @@ if __name__ == "__main__":
     datasetName = "Dataset106_cropped_Xch_breast_no_norm"
     # dataDir = rf"F:\MAMA-MIA\my_preprocessed_data\{datasetName}"
     dataDir = rf"{os.environ.get("MAMAMIA_DATA")}/my_preprocessed_data/{datasetName}"
-    pretrainedDecoderPath = r"transformerResults\TransformerTSJointWithSkips\BestSegOct20-DownsampleImages.pth"
-    # pretrainedDecoderPath = None
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    # pretrainedDecoderPath = r"transformerResults\TransformerTSJointWithSkips\BestSegOct20-DownsampleImages.pth"
+    pretrainedDecoderPath = None
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    tag = "Oct29-DownsampleWithMoreLayers"
+    tag = "Nov03-SingleEmbedding"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS
     # bottleneck = BOTTLENECK_TRANSFORMERST
     # bottleneck = BOTTLENECK_CONV
     skips = True
-    joint = True
+    joint = False
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=200, modelName=modelName, tag=tag, joint=joint, useJD=True, test=test)
+    trainer = MyTrainer(nEpochs=200, modelName=modelName, tag=tag, joint=joint, useJD=False, test=test)
     
     trainer.setup(dataDir, 
                   device, 

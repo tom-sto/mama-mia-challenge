@@ -250,7 +250,7 @@ class MySpatioTemporalTransformer(nn.Module):
 
         layer = TransformerLayer(emb_dim=self.embDim + self.nPatientDataOutFeatures, n_heads=nHeads, dropout=0.1)
         self.transformer    = Transformer(layer, num_layers=nLayers)
-        self.temporalProj   = AttentionPooling(self.embDim + self.nPatientDataOutFeatures, nHeads)
+        self.poolTokens     = AttentionPooling(self.embDim + self.nPatientDataOutFeatures, nHeads)
         self.fcToPatches    = nn.Linear(self.embDim + self.nPatientDataOutFeatures, self.embDim)
 
         self._initialize_weights()
@@ -268,7 +268,8 @@ class MySpatioTemporalTransformer(nn.Module):
 
         self.transformer.apply(init_weights_transformer)
     
-    def forward(self, x: torch.Tensor, shape: tuple[int], patientIDs: list[str], patchIndices: torch.Tensor):
+    def forward(self, x: torch.Tensor, shape: list[int], patientIDs: list[str], patchIndices: torch.Tensor,
+                useAttentionPooling: bool = True):
         B, T, N, E, X, Y, Z = shape
         patientDataEmb, acqTimes = self.patientDataMod(shape, patientIDs, x.device)
         patientDataEmb: torch.Tensor = patientDataEmb.permute(0, 2, 1, 3).reshape(B, -1, self.nPatientDataOutFeatures)      # [B, T*N*X*Y*Z, npatientDataOutFeatures]
@@ -278,29 +279,27 @@ class MySpatioTemporalTransformer(nn.Module):
         x = x.reshape(B, -1, E)                     # [B, T*N*X*Y*Z, E]
         x = torch.cat((x, patientDataEmb), dim=-1)  # [B, T*N*X*Y*Z, E + npatientDataOutFeatures]
 
-        # prepend CLS token for classification prediction
-        tok = self.clsToken.expand(B, T, -1)        # [B, T, E + npatientDataOutFeatures]
-        x = torch.cat((tok, x), dim=1)              # [B, T + T*N*X*Y*Z, E + npatientDataOutFeatures].
+        if not useAttentionPooling:
+            # prepend CLS token for classification prediction
+            tok = self.clsToken.expand(B, -1, -1)           # [B, 1, E + npatientDataOutFeatures]
+            x = torch.cat((tok, x), dim=1)                  # [B, 1 + T*N*X*Y*Z, E + npatientDataOutFeatures].
 
         timeSpaceIndices = torch.cat([acqTimes.unsqueeze(-1), patchIndices.repeat(1, T, 1)], dim=-1)
-        posEnc: torch.Tensor = PositionEncoding4D(timeSpaceIndices, dim=E + self.nPatientDataOutFeatures)
-        x[:, T:] = x[:, T:] + posEnc
+        posEnc: torch.Tensor = PositionEncoding4D(timeSpaceIndices, dim = E + self.nPatientDataOutFeatures)
 
-        x = self.transformer(x)                     # [B, T + T*N*X*Y*Z, E + npatientDataOutFeatures]
-        # reshape to [B, N*X*Y*Z + 1, T, E + npatientDataOutFeatures]
-        x = x.reshape(B, T, N*X*Y*Z + 1, -1).transpose(1, 2)
-        x = self.temporalProj(x)                                               # [B, N*X*Y*Z + 1, E + npatientDataOutFeatures]
+        x[:, -T*N*X*Y*Z:] = x[:, -T*N*X*Y*Z:] + posEnc
+        x = self.transformer(x)                     # [B, T*N*X*Y*Z (+1?), E + npatientDataOutFeatures]
+        
+        if useAttentionPooling:
+            x = self.poolTokens(x)            # [B, E + npatientDataOutFeatures]
+        else:
+            x = x[:, 0]                         # [B, E + npatientDataOutFeatures]
         
         # print(f"Shape after attention pooling: {x.shape}")
        
-        x = self.fcToPatches(x)  # [B, N*X*Y*Z + 1, E]
-        clsToken = x[:, 0]   # [B, E].
+        x = self.fcToPatches(x)  # [B, E]
 
-        # reshape to match conv shape
-        x = x[:, 1:].reshape(B, N, X, Y, Z, E)
-        x = x.permute(0, 1, 5, 2, 3, 4)         # (B, N, E, X, Y, Z)
-
-        return x, clsToken
+        return x
 
 class Transformer(nn.Module):
     def __init__(self,
