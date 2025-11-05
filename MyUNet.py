@@ -17,13 +17,14 @@ class MyUNet(torch.nn.Module):
                  nHeads: int = 8,
                  useSkips: bool = True,
                  joint: bool = True,
+                 catPosDecoder: bool = True,
                  pcrConfidence: bool = False,
                  bottleneck: str = "TransformerST",
                  nBottleneckLayers: int = 4):
         super().__init__()
         
         self.encoder = PatchEncoder(expectedChannels, expectedStride, dropout=0.1, useSkips=useSkips)
-        self.decoder = PatchDecoder(expectedChannels, useSkips=useSkips)
+        self.decoder = PatchDecoder(expectedChannels, catPosDecoder, useSkips=useSkips)
         self.poolSkips = AttentionPooling(expectedChannels[-1], nHeads)
         
         if pretrainedDecoderPath is not None:
@@ -49,6 +50,7 @@ class MyUNet(torch.nn.Module):
                 self.bottleneck = NoBottleneck(expectedChannels[-1], nHeads)
 
         self.classifier = ClassifierHead(dim=expectedChannels[-1]) if not pcrConfidence else ClassifierHeadWithConfidence(dim=expectedChannels[-1])
+        self.catPosDecoder = catPosDecoder
         self.ret = "all" if joint else "seg"
 
     def forward(self, x: torch.Tensor, patientIDs: list[str], patchIdxs: torch.Tensor, patientData: list = None):
@@ -60,8 +62,12 @@ class MyUNet(torch.nn.Module):
         pcrOut: torch.Tensor = self.classifier(sharedFeatures)       # [B, 1]
 
         posEnc = PositionEncoding3D(patchIdxs, dim=E)     # [B, N, E]
-        x = posEnc + sharedFeatures.unsqueeze(1).repeat(1, N, 1)        # TODO: maybe concat instead
-        x = x.reshape(-1, E)[..., None, None, None]            # [B*N, E, 1, 1, 1]
+        if self.catPosDecoder:
+            x = torch.cat([posEnc, sharedFeatures.unsqueeze(1).repeat(1, N, 1)], dim=-1)
+            x = x.reshape(-1, 2*E)[..., None, None, None]            # [B*N, E, 1, 1, 1]
+        else:
+            x = posEnc + sharedFeatures.unsqueeze(1).repeat(1, N, 1)
+            x = x.reshape(-1, E)[..., None, None, None]
         segOut: torch.Tensor = self.decoder(x, skips)
         segOut = segOut.reshape(B, N, *segOut.shape[-3:])
 

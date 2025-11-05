@@ -62,9 +62,9 @@ class PatchEncoder(nn.Module):
         self.apply(init_weights_conv)
 
 class PatchDecoder(nn.Module):
-    def __init__(self, channels: list[int], useSkips: bool = False):
+    def __init__(self, channels: list[int], catPosDecoder, useSkips: bool = False):
         super().__init__()
-        # print(f"DECODER CHANNELS: {channels}")     # [1, 32, 64, 128, 256, 320]
+        # print(f"DECODER CHANNELS: {channels}")
         self.encoder = nn.ModuleList([])
         self.decoder = nn.ModuleList([])
         numBlocks = len(channels) - 1
@@ -72,19 +72,35 @@ class PatchDecoder(nn.Module):
         self.useSkips = useSkips
         for i in range(numBlocks):
             if self.useSkips:
-                decBlock = nn.Sequential(
-                    nn.ConvTranspose3d(2*channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
-                    nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
-                    nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
-                    nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
-                )
+                if i == 0 and catPosDecoder:
+                    decBlock = nn.Sequential(
+                        nn.ConvTranspose3d(3*channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
+                        nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
+                        nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
+                        nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
+                    )
+                else:
+                    decBlock = nn.Sequential(
+                        nn.ConvTranspose3d(2*channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
+                        nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
+                        nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
+                        nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
+                    )
             else:
-                decBlock = nn.Sequential(
-                    nn.ConvTranspose3d(channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
-                    nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
-                    nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
-                    nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
-                )
+                if i == 0 and catPosDecoder:
+                    decBlock = nn.Sequential(
+                        nn.ConvTranspose3d(2*channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
+                        nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
+                        nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
+                        nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
+                    )
+                else:
+                    decBlock = nn.Sequential(
+                        nn.ConvTranspose3d(channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
+                        nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
+                        nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
+                        nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
+                    )
 
             self.decoder.append(decBlock)
         

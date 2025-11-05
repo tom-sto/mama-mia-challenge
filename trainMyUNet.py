@@ -35,7 +35,7 @@ class MyTrainer():
         self.currentEpoch = 0
         self.oversampleFG = 0.2
         self.oversampleRadius = 0.2
-        self.batchSize = 4
+        self.batchSize = 6
         self.clipGrad = False
         self.downsample = 2
 
@@ -196,13 +196,12 @@ class MyTrainer():
                             pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
 
                         bceLoss, diceLoss, bdLoss = self.SegLoss(segOut, target, distMap)
-                        segLoss: torch.Tensor = bceLoss + bdLoss
+                        segLoss: torch.Tensor = bceLoss + bdLoss + diceLoss
 
                         # Dice loss bad on foreground channels when we only background
                         # So ignore it for these batches
-                        if target.sum().item() > 0:
-                            segLoss += diceLoss
-                            diceLossesThisEpoch.append(diceLoss.item())
+                        # if target.sum().item() > 0:
+                        #     segLoss += diceLoss
 
                         print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Dice Loss: {diceLoss:.4f} + BD Loss: {bdLoss:.4f}{f" + PCR Loss {pcrLoss:.4f}" if pcrLoss is not None else ""}", end='\r')
 
@@ -211,6 +210,7 @@ class MyTrainer():
                     segLossesThisEpoch.append(segLoss.item())
                     bceLossesThisEpoch.append(bceLoss.item())
                     bdLossesThisEpoch.append(bdLoss.item())
+                    diceLossesThisEpoch.append(diceLoss.item())
                     
                     # now only do foreground for "real" Dice score
                     segOut: torch.Tensor = (segOut > 0).int()
@@ -231,8 +231,9 @@ class MyTrainer():
                                         features=sharedFeatures, 
                                         aggregator=self.aggregator,
                                         tasks_params=[list(self.model.decoder.parameters()), 
-                                                    list(self.model.classifier.parameters())],
-                                        shared_params=list(self.model.encoder.parameters()) + list(self.model.bottleneck.parameters()))
+                                                      list(self.model.classifier.parameters())],
+                                        shared_params=list(self.model.encoder.parameters()) + 
+                                                      list(self.model.bottleneck.parameters()))
                         else:
                             scaledLoss = self.gradScaler.scale(segLoss + pcrLoss)
                             scaledLoss.backward()
@@ -638,15 +639,15 @@ if __name__ == "__main__":
     dataDir = rf"{os.environ.get("MAMAMIA_DATA")}/my_preprocessed_data/{datasetName}"
     # pretrainedDecoderPath = r"transformerResults\TransformerTSJointWithSkips\BestSegOct20-DownsampleImages.pth"
     pretrainedDecoderPath = None
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    tag = "Nov03-SingleEmbedding"
+    tag = "Nov04-SingleEmbeddingCat"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS
     # bottleneck = BOTTLENECK_TRANSFORMERST
     # bottleneck = BOTTLENECK_CONV
-    skips = True
+    skips = False
     joint = False
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"

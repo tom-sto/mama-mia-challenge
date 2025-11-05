@@ -81,14 +81,15 @@ class DiceLoss(nn.Module):
     # [B, N, C, X, Y, Z],   B = numBatches, N = numPatches, C = 1, X,Y,Z = patchSize
     def forward(self, x: torch.Tensor, target: torch.Tensor):
         axes = tuple(range(x.ndim - 3, x.ndim))
-        sumTarget = target.sum(axes)
+        # TESTING: use mean instead of sum. no Dice exclusion.
+        sumTarget = target.mean(axes)
 
         # don't do Dice backprop when no foreground, let other losses handle that
-        if sumTarget.sum().item() == 0:
-            return torch.tensor(1., device=x.device)
+        # if sumTarget.sum().item() == 0:
+        #     return torch.tensor(1., device=x.device)
         
-        sumInput  = x.sum(axes)
-        intersect = (x * target).sum(axes)
+        sumInput  = x.mean(axes)
+        intersect = (x * target).mean(axes)
 
         dice    = (intersect * 2 + EPS) / (sumInput + sumTarget + EPS)
 
