@@ -35,7 +35,7 @@ class MyTrainer():
         self.currentEpoch = 0
         self.oversampleFG = 0.2
         self.oversampleRadius = 0.2
-        self.batchSize = 6
+        self.batchSize = 4
         self.clipGrad = False
         self.downsample = 2
 
@@ -67,7 +67,7 @@ class MyTrainer():
 
         self.device = device
         nHeads = 16
-        nBottleneckLayers = 12
+        nBottleneckLayers = 16
 
         self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
                             expectedChannels=[1, 64, 128, 256, 384, 576],
@@ -202,6 +202,7 @@ class MyTrainer():
                         # So ignore it for these batches
                         # if target.sum().item() > 0:
                         #     segLoss += diceLoss
+                        #     diceLossesThisEpoch.append(diceLoss.item())
 
                         print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Dice Loss: {diceLoss:.4f} + BD Loss: {bdLoss:.4f}{f" + PCR Loss {pcrLoss:.4f}" if pcrLoss is not None else ""}", end='\r')
 
@@ -639,9 +640,9 @@ if __name__ == "__main__":
     dataDir = rf"{os.environ.get("MAMAMIA_DATA")}/my_preprocessed_data/{datasetName}"
     # pretrainedDecoderPath = r"transformerResults\TransformerTSJointWithSkips\BestSegOct20-DownsampleImages.pth"
     pretrainedDecoderPath = None
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    tag = "Nov04-SingleEmbeddingCat"
+    tag = "Nov06-CatMoreChannelsKeepDice"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS

@@ -10,7 +10,7 @@ from Encodings import PositionEncoding3D
 class MyUNet(torch.nn.Module):
     def __init__(self, 
                  expectedPatchSize: int,
-                 expectedChannels: list[int] = [1, 32, 64, 128, 256, 320], 
+                 expectedChannels: list[int], 
                  expectedStride: list[int] = [2, 2, 2, 2, 2],
                  pretrainedDecoderPath: str = None,
                  patientDataPath: str = None,
@@ -22,6 +22,12 @@ class MyUNet(torch.nn.Module):
                  bottleneck: str = "TransformerST",
                  nBottleneckLayers: int = 4):
         super().__init__()
+
+        # [1, 64, 128, 256, 384, 576]
+        if not useSkips:
+            # [1, 96, 192, 384, 576, 864]
+            expectedChannels = [1] + [round(i * 1.5) for i in expectedChannels[1:]]
+            
         
         self.encoder = PatchEncoder(expectedChannels, expectedStride, dropout=0.1, useSkips=useSkips)
         self.decoder = PatchDecoder(expectedChannels, catPosDecoder, useSkips=useSkips)

@@ -18,21 +18,21 @@ class MyTransformerTS(nn.Module):
         self.emb_dim = channels[-1]
 
         self.patientDataMod = PatientDataEncoding(nHeads, patientDataPath)
-        self.nPatientDataOutFeatures = self.patientDataMod.nPatientDataOutFeatures
+        # self.nPatientDataOutFeatures = self.patientDataMod.nPatientDataOutFeatures
 
         expectedXYZ = patch_size
         for _ in range(len(channels) + 1):
             expectedXYZ = max(round(expectedXYZ / 2), 1)
 
-        self.cls_token   = nn.Parameter(torch.randn((1, 1, 1, self.emb_dim + self.nPatientDataOutFeatures)))
+        self.cls_token   = nn.Parameter(torch.randn((1, 1, 1, self.emb_dim)))
 
-        tLayer = TransformerLayer(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=nHeads, dropout=0.15)
-        sLayer = TransformerLayer(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=nHeads, dropout=0.15)
+        tLayer = TransformerLayer(emb_dim=self.emb_dim, n_heads=nHeads, dropout=0.15)
+        sLayer = TransformerLayer(emb_dim=self.emb_dim, n_heads=nHeads, dropout=0.15)
 
         self.transformerT   = Transformer(tLayer, num_layers=nLayers)
-        self.temporal_proj  = AttentionPooling(self.emb_dim + self.nPatientDataOutFeatures, nHeads)
+        self.temporal_proj  = AttentionPooling(self.emb_dim, nHeads)
         self.transformerS   = Transformer(sLayer, num_layers=nLayers)
-        self.fc_to_patches  = nn.Linear(self.emb_dim + self.nPatientDataOutFeatures, self.emb_dim)
+        self.fc_to_patches  = nn.Linear(self.emb_dim, self.emb_dim)
 
         self._initialize_weights()
 
@@ -67,18 +67,18 @@ class MyTransformerTS(nn.Module):
 
         # temporal encoding of acquisition times
         # print(f"acqTimes shape: {acqTimes.shape}")
-        temporalPosEnc = PositionEncoding(acqTimes, E + self.nPatientDataOutFeatures, div=100, scale=torch.pi*2).to(x.device)
+        temporalPosEnc = PositionEncoding(acqTimes, E, div=100, scale=torch.pi*2).to(x.device)
         # print(f"Temporal pos encoding: {temporalPosEnc.shape}")
         x[:, 1:] = x[:, 1:] + temporalPosEnc
 
         # temporal transformer first
-        x = x.reshape(-1, T, E + self.nPatientDataOutFeatures)
+        x = x.reshape(-1, T, E)
         x = self.transformerT(x)                                                # [B*(N*X*Y*Z + 1), T, E + npatientDataOutFeatures]
-        x = x.reshape(B, -1, T, E + self.nPatientDataOutFeatures)               # [B, N*X*Y*Z + 1, T, E + npatientDataOutFeatures]
+        x = x.reshape(B, -1, T, E)               # [B, N*X*Y*Z + 1, T, E + npatientDataOutFeatures]
         x = self.temporal_proj(x)                                               # [B, N*X*Y*Z + 1, E + npatientDataOutFeatures]
         # print(f"Shape after attention pooling: {x.shape}")
         
-        spatialPosEnc = PositionEncoding3D(patchIndices, E + self.nPatientDataOutFeatures)
+        spatialPosEnc = PositionEncoding3D(patchIndices, E)
         # print(f"Spatial pos encoding: {spatialPosEnc.shape}")
         x[:, 1:] = x[:, 1:] + spatialPosEnc
 
@@ -115,7 +115,7 @@ class MyTransformerST(nn.Module):
         for _ in range(len(channels) + 1):
             expectedXYZ = max(round(expectedXYZ / 2), 1)
 
-        self.cls_token   = nn.Parameter(torch.randn((1, 1, 1, self.emb_dim + self.nPatientDataOutFeatures)))
+        self.cls_token   = nn.Parameter(torch.randn((1, 1, 1, self.emb_dim)))
         
         ageMin = 21
         ageMax = 77
@@ -130,13 +130,13 @@ class MyTransformerST(nn.Module):
             else torch.tensor([0, 0, 0, 1]) if x == "d" \
             else torch.tensor([0, 0, 0, 0])
 
-        tLayer = TransformerLayer(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=nHeads, dropout=0.08)
-        sLayer = TransformerLayer(emb_dim=self.emb_dim + self.nPatientDataOutFeatures, n_heads=nHeads, dropout=0.08)
+        tLayer = TransformerLayer(emb_dim=self.emb_dim, n_heads=nHeads, dropout=0.08)
+        sLayer = TransformerLayer(emb_dim=self.emb_dim, n_heads=nHeads, dropout=0.08)
 
         self.transformerT   = Transformer(tLayer, num_layers=nLayers)
-        self.temporal_proj  = AttentionPooling(self.emb_dim + self.nPatientDataOutFeatures, nHeads)
+        self.temporal_proj  = AttentionPooling(self.emb_dim, nHeads)
         self.transformerS   = Transformer(sLayer, num_layers=nLayers)
-        self.fc_to_patches  = nn.Linear(self.emb_dim + self.nPatientDataOutFeatures, self.emb_dim)
+        self.fc_to_patches  = nn.Linear(self.emb_dim, self.emb_dim)
 
         self._initialize_weights()
 
@@ -191,12 +191,12 @@ class MyTransformerST(nn.Module):
         # print(f"x shape: {x.shape}")
         x = torch.cat((tok, x), dim=2)              # [B, T, N*X*Y*Z + 1, E + npatientDataOutFeatures].
 
-        spatialPosEnc = PositionEncoding3D(patchIndices, E + self.nPatientDataOutFeatures)
+        spatialPosEnc = PositionEncoding3D(patchIndices, E)
         # print(f"Spatial pos encoding: {spatialPosEnc.shape}")
         x[:, :, 1:] = x[:, :, 1:] + spatialPosEnc.unsqueeze(1).expand(-1, T, -1, -1)
 
         # first spatial transformer
-        x = x.reshape(-1, N + 1, E + self.nPatientDataOutFeatures)
+        x = x.reshape(-1, N + 1, E)
         x = self.transformerS(x)                    # [B*T, N*X*Y*Z + 1, E + npatientDataOutFeatures]
         x = x.reshape(B, T, N*X*Y*Z + 1, -1)        # [B, T, N*X*Y*Z + 1, E + npatientDataOutFeatures]
 
@@ -204,12 +204,12 @@ class MyTransformerST(nn.Module):
         # print(f"acqTimes shape: {acqTimes.shape}")
 
         x = x.transpose(1, 2)                       # [B, N*X*Y*Z + 1, T, E + npatientDataOutFeatures]
-        temporalPosEnc = PositionEncoding(acqTimes, E + self.nPatientDataOutFeatures, div=100, scale=torch.pi*2).to(x.device)       # [B, N*X*Y*Z, T, E + npatientDataOutFeatures]
+        temporalPosEnc = PositionEncoding(acqTimes, E, div=100, scale=torch.pi*2).to(x.device)       # [B, N*X*Y*Z, T, E + npatientDataOutFeatures]
         # print(f"Temporal pos encoding: {temporalPosEnc.shape}")
         x[:, 1:] = x[:, 1:] + temporalPosEnc
 
         # then temporal transformer
-        x = x.reshape(-1, T, E + self.nPatientDataOutFeatures)                  # [B*(N*X*Y*Z + 1), T, E + npatientDataOutFeatures]
+        x = x.reshape(-1, T, E)                  # [B*(N*X*Y*Z + 1), T, E + npatientDataOutFeatures]
         x = self.transformerT(x)                                                # [B*(N*X*Y*Z + 1), T, E + npatientDataOutFeatures]
         x = x.reshape(B, N*X*Y*Z + 1, T, -1)                                    # [B, N*X*Y*Z + 1, T, E + npatientDataOutFeatures]
         x = self.temporal_proj(x)                                               # [B, N*X*Y*Z + 1, E + npatientDataOutFeatures]
@@ -240,18 +240,18 @@ class MySpatioTemporalTransformer(nn.Module):
         self.embDim = channels[-1]
 
         self.patientDataMod = PatientDataEncoding(nHeads, patientDataPath)
-        self.nPatientDataOutFeatures = self.patientDataMod.nPatientDataOutFeatures
+        # self.nPatientDataOutFeatures = self.patientDataMod.nPatientDataOutFeatures
 
         expectedXYZ = patchSize
         for _ in range(len(channels) + 1):
             expectedXYZ = max(round(expectedXYZ / 2), 1)
 
-        self.clsToken = nn.Parameter(torch.randn((1, 1, self.embDim + self.nPatientDataOutFeatures)))
+        self.clsToken = nn.Parameter(torch.randn((1, 1, self.embDim)))
 
-        layer = TransformerLayer(emb_dim=self.embDim + self.nPatientDataOutFeatures, n_heads=nHeads, dropout=0.1)
+        layer = TransformerLayer(emb_dim=self.embDim, n_heads=nHeads, dropout=0.1)
         self.transformer    = Transformer(layer, num_layers=nLayers)
-        self.poolTokens     = AttentionPooling(self.embDim + self.nPatientDataOutFeatures, nHeads)
-        self.fcToPatches    = nn.Linear(self.embDim + self.nPatientDataOutFeatures, self.embDim)
+        self.poolTokens     = AttentionPooling(self.embDim, nHeads)
+        # self.fcToPatches    = nn.Linear(self.embDim, self.embDim)
 
         self._initialize_weights()
 
@@ -271,13 +271,13 @@ class MySpatioTemporalTransformer(nn.Module):
     def forward(self, x: torch.Tensor, shape: list[int], patientIDs: list[str], patchIndices: torch.Tensor,
                 useAttentionPooling: bool = True):
         B, T, N, E, X, Y, Z = shape
-        patientDataEmb, acqTimes = self.patientDataMod(shape, patientIDs, x.device)
-        patientDataEmb: torch.Tensor = patientDataEmb.permute(0, 2, 1, 3).reshape(B, -1, self.nPatientDataOutFeatures)      # [B, T*N*X*Y*Z, npatientDataOutFeatures]
+        _, acqTimes = self.patientDataMod(shape, patientIDs, x.device)
+        # patientDataEmb: torch.Tensor = patientDataEmb.permute(0, 2, 1, 3).reshape(B, -1, self.nPatientDataOutFeatures)      # [B, T*N*X*Y*Z, npatientDataOutFeatures]
         acqTimes: torch.Tensor       = acqTimes.transpose(1, 2).reshape(B, -1)                                              # [B, T*N*X*Y*Z]
 
         x = x.permute(0, 1, 2, 4, 5, 6, 3)          # [B, T, N, E, X, Y, Z] -> [B, T, N, X, Y, Z, E]; put T, N, X, Y, Z next to each other so they can be squished
         x = x.reshape(B, -1, E)                     # [B, T*N*X*Y*Z, E]
-        x = torch.cat((x, patientDataEmb), dim=-1)  # [B, T*N*X*Y*Z, E + npatientDataOutFeatures]
+        # x = torch.cat((x, patientDataEmb), dim=-1)  # [B, T*N*X*Y*Z, E + npatientDataOutFeatures]
 
         if not useAttentionPooling:
             # prepend CLS token for classification prediction
@@ -285,7 +285,7 @@ class MySpatioTemporalTransformer(nn.Module):
             x = torch.cat((tok, x), dim=1)                  # [B, 1 + T*N*X*Y*Z, E + npatientDataOutFeatures].
 
         timeSpaceIndices = torch.cat([acqTimes.unsqueeze(-1), patchIndices.repeat(1, T, 1)], dim=-1)
-        posEnc: torch.Tensor = PositionEncoding4D(timeSpaceIndices, dim = E + self.nPatientDataOutFeatures)
+        posEnc: torch.Tensor = PositionEncoding4D(timeSpaceIndices, dim = E)
 
         x[:, -T*N*X*Y*Z:] = x[:, -T*N*X*Y*Z:] + posEnc
         x = self.transformer(x)                     # [B, T*N*X*Y*Z (+1?), E + npatientDataOutFeatures]
@@ -297,7 +297,7 @@ class MySpatioTemporalTransformer(nn.Module):
         
         # print(f"Shape after attention pooling: {x.shape}")
        
-        x = self.fcToPatches(x)  # [B, E]
+        # x = self.fcToPatches(x)  # [B, E]
 
         return x
 

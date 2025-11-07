@@ -76,40 +76,34 @@ class BoundaryLoss(nn.Module):
 class DiceLoss(nn.Module):
     def __init__(self):
         super().__init__()
+        self.classWeights = torch.tensor([0.1, 0.9])
 
     # assume x is activated with sigmoid, foreground probs only
-    # [B, N, C, X, Y, Z],   B = numBatches, N = numPatches, C = 1, X,Y,Z = patchSize
+    # [B, N, X, Y, Z],   B = numBatches, N = numPatches, X,Y,Z = patchSize
     def forward(self, x: torch.Tensor, target: torch.Tensor):
+        # extract foreground vs background predictions
+        x = x.unsqueeze(2)
+        target = target.unsqueeze(2)
+
+        x = torch.cat([1-x, x], dim=2)
+        target = torch.cat([1-target, target], dim=2)
+
         axes = tuple(range(x.ndim - 3, x.ndim))
-        # TESTING: use mean instead of sum. no Dice exclusion.
-        sumTarget = target.mean(axes)
 
-        # don't do Dice backprop when no foreground, let other losses handle that
-        # if sumTarget.sum().item() == 0:
-        #     return torch.tensor(1., device=x.device)
-        
-        sumInput  = x.mean(axes)
-        intersect = (x * target).mean(axes)
+        sumTarget = target.sum(axes)
+        sumInput  = x.sum(axes)
+        intersect = (x * target).sum(axes)
 
-        dice    = (intersect * 2 + EPS) / (sumInput + sumTarget + EPS)
+        # N = x.numel() + target.numel()
+        dice    = (intersect * 2 + EPS) / ((sumInput + sumTarget) + EPS)
 
         # Balance foreground vs background
-        fgMask  = (sumTarget > 0).float()
-        bgMask  = -fgMask + 1
+        # classFreq = sumTarget.mean(dim=(0, 1))  # mean over batch and patch dims
+        # classWeights = 1 - (classFreq / (classFreq.sum()))
+        # classWeights = classWeights / (classWeights.sum())
         
-        # If p% of patches contain tumor, scale those patches by q% = 100% - p%
-        # Scale the rest of the patches by p%. Then normalize.
-        fgW = bgMask.mean()
-        bgW = fgMask.mean()
+        weighted = (dice * self.classWeights.to(x.device).view(1, 1, -1)).sum(dim=2)
 
-        # Using fgMask.mean() as a proxy for Pr(Patch contains foreground) = p%
-        # Because we are scaling only the patches in fgMask by q% 
-        # E[Weighted Dice] = E[(p% * q% + q% * p%) * Dice]
-        #                  = fgW * fgMask.mean() * E[Dice] + bgW * bgMask.mean() * E[Dice] 
-        #                  = E[Dice] * 2 * fgW * bgW
-        normFactor = (1 / (fgW * bgW * 2)) if fgW.item() != 0 and bgW.item() != 0 else 1
-
-        weighted = (fgMask * fgW + bgMask * bgW) * dice * normFactor
         return 1 - weighted.mean()
     
 class SegLoss(nn.Module):

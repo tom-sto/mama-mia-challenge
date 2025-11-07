@@ -24,7 +24,7 @@ class PatchEncoder(nn.Module):
             encBlock = nn.Sequential(
                 nn.Dropout3d(dropout) if i == numBlocks - 1 else nn.Identity(),
                 nn.GroupNorm(num_groups=min(8, channels[i]), num_channels=channels[i]) if i != 0 else nn.Identity(),
-                nn.Conv3d(channels[i], channels[i], kernel_size=3, padding=1) if i == 0 or i == 1 else nn.Identity(),
+                nn.Conv3d(channels[i], channels[i], kernel_size=3, padding=1),
                 nn.Conv3d(channels[i], channels[i + 1], kernel_size=3, padding=1),
                 nn.ReLU(True),
                 nn.MaxPool3d(kernel_size=3, stride=strides[i], padding=1)

@@ -19,7 +19,7 @@ BOTTLENECK_SPATIOTEMPORAL = "SpatioTemporal"
 BOTTLENECK_CONV = "Conv"
 BOTTLENECK_NONE = "None"
 
-EPS = 1e-5
+EPS = 1e-3
 
 def Mean(l: list):
     if len(l) == 0:
