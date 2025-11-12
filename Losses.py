@@ -76,7 +76,7 @@ class BoundaryLoss(nn.Module):
 class DiceLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self.classWeights = torch.tensor([0.1, 0.9])
+        # self.classWeights = torch.tensor([0.1, 0.9])
 
     # assume x is activated with sigmoid, foreground probs only
     # [B, N, X, Y, Z],   B = numBatches, N = numPatches, X,Y,Z = patchSize
@@ -94,41 +94,65 @@ class DiceLoss(nn.Module):
         sumInput  = x.sum(axes)
         intersect = (x * target).sum(axes)
 
-        # N = x.numel() + target.numel()
-        dice    = (intersect * 2 + EPS) / ((sumInput + sumTarget) + EPS)
+        N = x.numel()
+        dice    = (intersect * 2 / N + EPS) / ((sumInput + sumTarget) / N + EPS)
 
         # Balance foreground vs background
-        # classFreq = sumTarget.mean(dim=(0, 1))  # mean over batch and patch dims
-        # classWeights = 1 - (classFreq / (classFreq.sum()))
-        # classWeights = classWeights / (classWeights.sum())
+        classFreq = sumTarget.mean(dim=(0, 1))  # mean over batch and patch dims
+        classWeights = 1 - (classFreq / (classFreq.sum()))
+        classWeights = classWeights / (classWeights.sum())
         
-        weighted = (dice * self.classWeights.to(x.device).view(1, 1, -1)).sum(dim=2)
+        weighted = (dice * classWeights.view(1, 1, -1)).sum(dim=2)
 
         return 1 - weighted.mean()
     
+class TverskyLoss(nn.Module):
+    def __init__(self, alpha: float, beta: float, normalize: bool = True):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.normalize = normalize
+
+    def forward(self, x: torch.Tensor, target: torch.Tensor):
+        axes = tuple(range(1, x.ndim))
+        TP = (x * target).sum(axes)
+        FP = (x * (1 - target)).sum(axes)
+        FN = ((1 - x) * target).sum(axes)
+
+        if self.normalize:
+            n = x.numel()
+            TP = TP / n
+            FP = FP / n
+            FN = FN / n
+        
+        tversky = (TP + EPS) / (TP + self.alpha*FN + self.beta*FP + EPS)
+
+        return 1 - tversky.mean()
+    
 class SegLoss(nn.Module):
-    def __init__(self, bcePosWeight: float, downsample: int):
+    def __init__(self, bcePosWeight: float, downsample: int, normalizeTV: bool,
+                 alpha: float = 0.5, beta: float = 0.5):
         super().__init__()
 
-        self.DiceWeight = 3
-        self.BCEWeight  = 2
-        self.BDWeight   = 1 / downsample
-
-        self.DiceLoss   = DiceLoss()
-        self.BCELoss    = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(bcePosWeight))
-        self.BDLoss     = BoundaryLoss(class_idx=0)
+        self.BCWeight  = 2
+        self.BDWeight  = 1 / downsample
+        self.TVWeight  = 1   
+        
+        self.BCLoss = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([bcePosWeight]))
+        self.BDLoss = BoundaryLoss(class_idx=0)
+        self.TVLoss = TverskyLoss(alpha=alpha, beta=beta, normalize=normalizeTV)
 
     # expect x shape: [B, N, 1, X, Y, Z]
     def forward(self, x: torch.Tensor, target: torch.Tensor, dmaps: torch.Tensor) -> tuple[torch.Tensor]:
-        bceLoss: torch.Tensor = self.BCELoss(x, target.float())
+        # bcLoss: torch.Tensor = self.BCLoss(x, target.float())
         
         # now we activate with sigmoid since these losses assume prob input
         x = torch.sigmoid(x)
-        
-        # oldDiceLoss = self.OldDiceLoss(x, target)
-        diceLoss: torch.Tensor  = self.DiceLoss(x, target)
-        bdLoss: torch.Tensor    = self.BDLoss(x, dmaps)
-        return bceLoss * self.BCEWeight, diceLoss * self.DiceWeight, (1 + bdLoss) * self.BDWeight
+        # bdLoss: torch.Tensor = self.BDLoss(x, dmaps)
+        tvLoss: torch.Tensor = self.TVLoss(x, target)
+
+        # return bcLoss * self.BCWeight, torch.tensor(0) #(1 + bdLoss) * self.BDWeight
+        return tvLoss * self.TVWeight
 
 # Assume input and target are same size (X, Y, Z) and the values of each entry are binary.
 # Return Dice loss and Dice score

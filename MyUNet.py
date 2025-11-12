@@ -20,7 +20,8 @@ class MyUNet(torch.nn.Module):
                  catPosDecoder: bool = True,
                  pcrConfidence: bool = False,
                  bottleneck: str = "TransformerST",
-                 nBottleneckLayers: int = 4):
+                 nBottleneckLayers: int = 4,
+                 useAttentionPooling: bool = True):
         super().__init__()
 
         # [1, 64, 128, 256, 384, 576]
@@ -47,7 +48,7 @@ class MyUNet(torch.nn.Module):
             case helpers.BOTTLENECK_TRANSFORMERST:
                 self.bottleneck = MyTransformerST(expectedPatchSize, expectedChannels, nHeads, nBottleneckLayers, patientDataPath)
             case helpers.BOTTLENECK_SPATIOTEMPORAL:
-                self.bottleneck = MySpatioTemporalTransformer(expectedPatchSize, expectedChannels, nHeads, nBottleneckLayers, patientDataPath)
+                self.bottleneck = MySpatioTemporalTransformer(expectedPatchSize, expectedChannels, nHeads, nBottleneckLayers, patientDataPath, useAttentionPooling=useAttentionPooling)
             
             # TODO: Implement PCR with these bottlenecks
             case helpers.BOTTLENECK_CONV:

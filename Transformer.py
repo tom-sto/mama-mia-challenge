@@ -229,11 +229,12 @@ class MySpatioTemporalTransformer(nn.Module):
     # combine T and N, pass through transformer at same time
     # position encode time and space at the same time too
     def __init__(self,
-                 patchSize,
-                 channels,
-                 nHeads,
-                 nLayers,
-                 patientDataPath):
+                 patchSize: int,
+                 channels: list[int],
+                 nHeads: int,
+                 nLayers: int,
+                 patientDataPath: str,
+                 useAttentionPooling: bool):
         super().__init__()
 
         self.patchSize = patchSize
@@ -241,6 +242,7 @@ class MySpatioTemporalTransformer(nn.Module):
 
         self.patientDataMod = PatientDataEncoding(nHeads, patientDataPath)
         # self.nPatientDataOutFeatures = self.patientDataMod.nPatientDataOutFeatures
+        self.useAttentionPooling = useAttentionPooling
 
         expectedXYZ = patchSize
         for _ in range(len(channels) + 1):
@@ -268,8 +270,7 @@ class MySpatioTemporalTransformer(nn.Module):
 
         self.transformer.apply(init_weights_transformer)
     
-    def forward(self, x: torch.Tensor, shape: list[int], patientIDs: list[str], patchIndices: torch.Tensor,
-                useAttentionPooling: bool = True):
+    def forward(self, x: torch.Tensor, shape: list[int], patientIDs: list[str], patchIndices: torch.Tensor):
         B, T, N, E, X, Y, Z = shape
         _, acqTimes = self.patientDataMod(shape, patientIDs, x.device)
         # patientDataEmb: torch.Tensor = patientDataEmb.permute(0, 2, 1, 3).reshape(B, -1, self.nPatientDataOutFeatures)      # [B, T*N*X*Y*Z, npatientDataOutFeatures]
@@ -279,7 +280,7 @@ class MySpatioTemporalTransformer(nn.Module):
         x = x.reshape(B, -1, E)                     # [B, T*N*X*Y*Z, E]
         # x = torch.cat((x, patientDataEmb), dim=-1)  # [B, T*N*X*Y*Z, E + npatientDataOutFeatures]
 
-        if not useAttentionPooling:
+        if not self.useAttentionPooling:
             # prepend CLS token for classification prediction
             tok = self.clsToken.expand(B, -1, -1)           # [B, 1, E + npatientDataOutFeatures]
             x = torch.cat((tok, x), dim=1)                  # [B, 1 + T*N*X*Y*Z, E + npatientDataOutFeatures].
@@ -290,7 +291,7 @@ class MySpatioTemporalTransformer(nn.Module):
         x[:, -T*N*X*Y*Z:] = x[:, -T*N*X*Y*Z:] + posEnc
         x = self.transformer(x)                     # [B, T*N*X*Y*Z (+1?), E + npatientDataOutFeatures]
         
-        if useAttentionPooling:
+        if self.useAttentionPooling:
             x = self.poolTokens(x)            # [B, E + npatientDataOutFeatures]
         else:
             x = x[:, 0]                         # [B, E + npatientDataOutFeatures]

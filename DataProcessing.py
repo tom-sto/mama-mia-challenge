@@ -180,7 +180,7 @@ def GetIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample:
     minFG = [round(c / downsampleFactor) for c in minFG]
     maxFG = [round(c / downsampleFactor) for c in maxFG]
     indices = []
-    oversampleThreshold = np.clip(np.random.normal(oversample, oversampleRadius), 0, 1)
+    oversampleThreshold = np.clip(np.random.normal(oversample, oversampleRadius), 0.1, 1)
     for _ in range(numPatches):
         # make sure that our patches are sampled so that they all DO NOT contain tumor foreground
         if oversample == -1:
