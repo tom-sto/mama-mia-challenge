@@ -248,9 +248,9 @@ class MySpatioTemporalTransformer(nn.Module):
         for _ in range(len(channels) + 1):
             expectedXYZ = max(round(expectedXYZ / 2), 1)
 
-        self.clsToken = nn.Parameter(torch.randn((1, 1, self.embDim)))
+        self.clsToken = nn.Parameter(torch.zeros((1, 1, self.embDim)))
 
-        layer = TransformerLayer(emb_dim=self.embDim, n_heads=nHeads, dropout=0.1)
+        layer = TransformerLayer(emb_dim=self.embDim, n_heads=nHeads, dropout=0)
         self.transformer    = Transformer(layer, num_layers=nLayers)
         self.poolTokens     = AttentionPooling(self.embDim, nHeads)
         # self.fcToPatches    = nn.Linear(self.embDim, self.embDim)

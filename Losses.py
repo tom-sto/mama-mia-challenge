@@ -130,29 +130,28 @@ class TverskyLoss(nn.Module):
         return 1 - tversky.mean()
     
 class SegLoss(nn.Module):
-    def __init__(self, bcePosWeight: float, downsample: int, normalizeTV: bool,
+    def __init__(self, bcePosWeight: torch.Tensor, downsample: int, normalizeTV: bool, 
                  alpha: float = 0.5, beta: float = 0.5):
         super().__init__()
 
-        self.BCWeight  = 2
-        self.BDWeight  = 1 / downsample
-        self.TVWeight  = 1   
-        
-        self.BCLoss = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([bcePosWeight]))
+        self.BCWeight  = 1
+        self.BDWeight  = 0 #1 / downsample
+        self.TVWeight  = 2
+
+        self.BCLoss = nn.BCEWithLogitsLoss(pos_weight=bcePosWeight)
         self.BDLoss = BoundaryLoss(class_idx=0)
         self.TVLoss = TverskyLoss(alpha=alpha, beta=beta, normalize=normalizeTV)
 
     # expect x shape: [B, N, 1, X, Y, Z]
     def forward(self, x: torch.Tensor, target: torch.Tensor, dmaps: torch.Tensor) -> tuple[torch.Tensor]:
-        # bcLoss: torch.Tensor = self.BCLoss(x, target.float())
+        self.bc: torch.Tensor = self.BCLoss(x, target.float())
         
         # now we activate with sigmoid since these losses assume prob input
         x = torch.sigmoid(x)
-        # bdLoss: torch.Tensor = self.BDLoss(x, dmaps)
-        tvLoss: torch.Tensor = self.TVLoss(x, target)
+        #self.bd: torch.Tensor = self.BDLoss(x, dmaps)
+        self.tv: torch.Tensor = self.TVLoss(x, target)
 
-        # return bcLoss * self.BCWeight, torch.tensor(0) #(1 + bdLoss) * self.BDWeight
-        return tvLoss * self.TVWeight
+        return self.tv * self.TVWeight + self.bc * self.BCWeight #+ self.bd * self.BDWeight
 
 # Assume input and target are same size (X, Y, Z) and the values of each entry are binary.
 # Return Dice loss and Dice score

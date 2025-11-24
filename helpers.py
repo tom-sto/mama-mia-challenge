@@ -2,7 +2,7 @@ import torch
 
 IMAGE_TYPES = ("phase", "seg", "dmap")
 PATCH_SIZE  = 32
-NUM_PATCHES = 32
+NUM_PATCHES = 50
 CHUNK_SIZE  = NUM_PATCHES
 
 ACQ_TIME_THRESHOLD = 750
