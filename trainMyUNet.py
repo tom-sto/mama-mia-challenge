@@ -37,7 +37,7 @@ class MyTrainer():
         self.currentEpoch = 0
         self.oversampleFG = 0.4
         self.oversampleRadius = 0.15
-        self.batchSize = 3
+        self.batchSize = 5
         self.clipGrad = False
         self.downsample = 2
 
@@ -72,7 +72,7 @@ class MyTrainer():
         nBottleneckLayers = 16
 
         self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
-                            expectedChannels=[1, 64, 128, 256, 320, 320],   #[1, 32, 64, 128, 256]
+                            expectedChannels=[1, 96, 144, 216, 320, 320],   #[1, 32, 64, 128, 256]
                             expectedStride=[2, 2, 2, 2, 2],
                             pretrainedDecoderPath=pretrainedDecoderPath,
                             patientDataPath=self.patientDataPath,
@@ -329,7 +329,7 @@ class MyTrainer():
                         del segOut
                 
                     segOut = torch.cat(allOuts, dim=1)
-                    segLoss = valLoss(segOut, target, distMap)
+                    segLoss = valLoss(segOut.float(), target, distMap)
 
                     bceLoss = valLoss.bc * valLoss.BCWeight
                     bdLoss = valLoss.bd * valLoss.BDWeight
@@ -659,7 +659,7 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     cat = False
     pool = True
-    tag = f"Dec04-{'Cat' if cat else 'Add'}{'Pool' if pool else 'Cls'}AllLossesPatch64"
+    tag = f"Dec04-{'Cat' if cat else 'Add'}{'Pool' if pool else 'Cls'}TVAndBCEPatch64"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS
@@ -667,7 +667,7 @@ if __name__ == "__main__":
     # bottleneck = BOTTLENECK_CONV
     skips = False
     joint = False
-    test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
+    test  = True        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
     trainer = MyTrainer(nEpochs=400, modelName=modelName, tag=tag, joint=joint, cat=cat, pool=pool, useJD=False, test=test)
     

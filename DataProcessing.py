@@ -2,6 +2,7 @@ import os, glob
 import torch
 import zarr, math
 import numpy as np
+from scipy.ndimage import zoom
 import SimpleITK as sitk
 import pandas as pd
 from functools import partial
@@ -11,35 +12,121 @@ from helpers import ACQ_TIME_THRESHOLD, MIN_NUM_PHASES
 
 @torch.jit.script
 def ExtractPatches(array: list[torch.Tensor], patch_indices: list[list[list[int]]], patch_size: int):
+    # Determine tensor dimensions and setup output tensor 'patches'
     n_patches = len(patch_indices[0])
-    n_arrays  = len(array)      # batch size
+    n_arrays = len(array)      # batch size
     
-    if array[0].ndim == 4:
-        n_phases = len(array[0])
-        patches = torch.empty((n_arrays, n_patches, n_phases, patch_size, patch_size, patch_size), dtype=array[0].dtype)
-    elif array[0].ndim == 3:
-        patches = torch.empty((n_arrays, n_patches, patch_size, patch_size, patch_size), dtype=array[0].dtype)
+    # Get the expected dimensions of the full input array (assuming all arrays have same number of dimensions)
+    array_ndim = array[0].ndim
+
+    # Initialize the output tensor 'patches' based on dimensions
+    if array_ndim == 4:
+        n_phases = array[0].size(0)
+        patches = torch.empty((n_arrays, n_patches, n_phases, patch_size, patch_size, patch_size), dtype=array[0].dtype, device=array[0].device)
+    elif array_ndim == 3:
+        patches = torch.empty((n_arrays, n_patches, patch_size, patch_size, patch_size), dtype=array[0].dtype, device=array[0].device)
     else:
-        raise Exception(f"Cannot extract 3D patches from {array[0].ndim}D tensor!")
+        raise Exception(f"Cannot extract 3D patches from {array_ndim}D tensor! Expected 3D or 4D.")
     
     for i in range(n_arrays):
         arr = array[i]
+        dim_start = array_ndim - 3
+
+        max_d, max_h, max_w = arr.size(dim_start), arr.size(dim_start + 1), arr.size(dim_start + 2)
+
         for j in range(n_patches):
             idx: list[int] = patch_indices[i][j]
-            x, y, z = idx
+            d_start, h_start, w_start = idx # D, H, W start indices
+            
+            d_end = min(d_start + patch_size, max_d)
+            h_end = min(h_start + patch_size, max_h)
+            w_end = min(w_start + patch_size, max_w)
+            
+            slice_d = d_end - d_start
+            slice_h = h_end - h_start
+            slice_w = w_end - w_start
+            
+            if slice_d <= 0 or slice_h <= 0 or slice_w <= 0:
+                 continue
+            
             if arr.ndim == 3:
-                patches[i, j] = arr[x:x+patch_size, y:y+patch_size, z:z+patch_size]
-            elif arr.ndim > 3:
-                patches[i, j] = arr[..., x:x+patch_size, y:y+patch_size, z:z+patch_size]
-            else:
-                raise Exception(f"Cannot extract 3D patches from {arr.ndim}D tensor!")
-        
+                # 3D: (D, H, W)
+                arr_slice = arr[d_start:d_end, h_start:h_end, w_start:w_end]
+                patch_tensor = torch.zeros((patch_size, patch_size, patch_size), dtype=arr.dtype, device=arr.device)
+                
+                patch_tensor[0:slice_d, 0:slice_h, 0:slice_w] = arr_slice
+                patches[i, j] = patch_tensor
+                
+            elif arr.ndim == 4:
+                # 4D: (P, D, H, W)
+                arr_slice = arr[:, d_start:d_end, h_start:h_end, w_start:w_end]
+                n_phases = arr_slice.size(0) # Should be the same as array[0].size(0)
+                
+                # Create a zero tensor for padding, including the phase dimension
+                patch_tensor = torch.zeros((n_phases, patch_size, patch_size, patch_size), dtype=arr.dtype, device=arr.device)
+
+                patch_tensor[:, 0:slice_d, 0:slice_h, 0:slice_w] = arr_slice
+                patches[i, j] = patch_tensor
+                
     return patches
 
+# @torch.jit.script
+# def ExtractPatches(array: list[torch.Tensor], patch_indices: list[list[list[int]]], patch_size: int):
+#     n_patches = len(patch_indices[0])
+#     n_arrays  = len(array)      # batch size
+    
+#     if array[0].ndim == 4:
+#         n_phases = len(array[0])
+#         patches = torch.empty((n_arrays, n_patches, n_phases, patch_size, patch_size, patch_size), dtype=array[0].dtype)
+#     elif array[0].ndim == 3:
+#         patches = torch.empty((n_arrays, n_patches, patch_size, patch_size, patch_size), dtype=array[0].dtype)
+#     else:
+#         raise Exception(f"Cannot extract 3D patches from {array[0].ndim}D tensor!")
+    
+#     for i in range(n_arrays):
+#         arr = array[i]
+#         for j in range(n_patches):
+#             idx: list[int] = patch_indices[i][j]
+#             x, y, z = idx
+#             if arr.ndim == 3:
+#                 patches[i, j] = arr[x:x+patch_size, y:y+patch_size, z:z+patch_size]
+#             elif arr.ndim > 3:
+#                 patches[i, j] = arr[..., x:x+patch_size, y:y+patch_size, z:z+patch_size]
+#             else:
+#                 raise Exception(f"Cannot extract 3D patches from {arr.ndim}D tensor!")
+        
+#     return patches
+
 def Downsample(arr: np.ndarray, factor: int):
+    if factor <= 0:
+        raise ValueError("Downsampling factor must be a positive integer.")
     if factor == 1:
         return arr
-    return arr[::factor, ::factor, ::factor]        # simple downsampling, no smoothing
+
+    if np.issubdtype(arr.dtype, np.floating):
+        if arr.dtype != np.float32:
+            arr = arr.astype(np.float32)
+        interpolation_order = 1  # Linear interpolation
+    else:
+        if arr.dtype != np.int32:
+            arr = arr.astype(np.int32)
+        interpolation_order = 0  # Nearest neighbor
+    
+    spatial_dims = 3
+    num_batch_dims = arr.ndim - spatial_dims
+
+    if num_batch_dims < 0:
+        raise ValueError("Input array must have at least 3 dimensions (D, H, W).")
+
+    zoom_ratios = [1.0] * num_batch_dims + [1.0 / factor] * spatial_dims
+
+    downsampled_arr = zoom(
+        input=arr,
+        zoom=zoom_ratios,
+        order=interpolation_order
+    )
+
+    return downsampled_arr
 
 ''' 
 data {

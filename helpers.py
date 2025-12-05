@@ -2,8 +2,8 @@ import torch
 import torch.nn.functional as F
 
 IMAGE_TYPES = ("phase", "seg", "dmap")
-PATCH_SIZE  = 44
-NUM_PATCHES = 54
+PATCH_SIZE  = 64
+NUM_PATCHES = 64
 CHUNK_SIZE  = 4
 
 ACQ_TIME_THRESHOLD = 750
