@@ -135,7 +135,7 @@ class SegLoss(nn.Module):
         super().__init__()
 
         self.BCWeight  = 1
-        self.BDWeight  = 0 #1 / downsample
+        self.BDWeight  = 1 / downsample
         self.TVWeight  = 2
 
         self.BCLoss = nn.BCEWithLogitsLoss(pos_weight=bcePosWeight)
@@ -148,10 +148,10 @@ class SegLoss(nn.Module):
         
         # now we activate with sigmoid since these losses assume prob input
         x = torch.sigmoid(x)
-        #self.bd: torch.Tensor = self.BDLoss(x, dmaps)
+        self.bd: torch.Tensor = self.BDLoss(x, dmaps)
         self.tv: torch.Tensor = self.TVLoss(x, target)
 
-        return self.tv * self.TVWeight + self.bc * self.BCWeight #+ self.bd * self.BDWeight
+        return self.tv * self.TVWeight + self.bc * self.BCWeight + self.bd * self.BDWeight
 
 # Assume input and target are same size (X, Y, Z) and the values of each entry are binary.
 # Return Dice loss and Dice score

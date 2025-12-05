@@ -72,7 +72,7 @@ class MyTrainer():
         nBottleneckLayers = 16
 
         self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
-                            expectedChannels=[1, 96, 144, 216, 324, 324],   #[1, 32, 64, 128, 256]
+                            expectedChannels=[1, 64, 128, 256, 320, 320],   #[1, 32, 64, 128, 256]
                             expectedStride=[2, 2, 2, 2, 2],
                             pretrainedDecoderPath=pretrainedDecoderPath,
                             patientDataPath=self.patientDataPath,
@@ -123,13 +123,13 @@ class MyTrainer():
         # bce pos_weight should be close to the ratio of background to foreground in segmentations
         # since we oversample, we know some percentage of patches will have foreground
         # we don't know how much foreground though, since we sample randomly on the bounding box
-        # so we guess that around 100*x% of each oversampled patch is foreground. -> self.oversampleFG * x
+        # so we guess that around 100x% of each oversampled patch is foreground. -> self.oversampleFG * x
         x = 0.3 * 0.6
         # If we dont oversample, then the average ratio of background to foreground is used
         # (i don't actually know this number rn, so again just guess that ~5% voxels are foreground)
         # So otherwise, posWeight = 95% / 5% = 19
         # self.bcePosWeight = min(1 / (self.oversampleFG * x) - 1, 50) if self.oversampleFG != 0 else 19
-        self.bcePosWeight = 50
+        self.bcePosWeight = 100
         self.SegLoss = SegLoss(bcePosWeight=torch.tensor([self.bcePosWeight], device=device), downsample=self.downsample, 
                                normalizeTV=False, alpha=0.95, beta=0.05)
 
@@ -149,7 +149,7 @@ class MyTrainer():
         bestJointEpoch = self.currentEpoch
 
         valLoss = SegLoss(bcePosWeight=torch.tensor([self.bcePosWeight]), downsample=self.downsample, 
-                          normalizeTV=True, alpha=0.95, beta=0.05)
+                          normalizeTV=False, alpha=0.95, beta=0.05)
 
         import numpy.random as rd
         rd.seed(1234)
@@ -180,7 +180,8 @@ class MyTrainer():
             nBatches = len(self.trDataloader)
 
             # iterations = ["oversample", "oversample", "oversample", "no tumor", "no tumor", "no tumor"]
-            iterations = ["oversample", "oversample", "oversample", "no tumor", "no tumor"]
+            # iterations = ["oversample", "oversample", "oversample", "no tumor", "no tumor"]
+            iterations = ["oversample", "oversample", "no tumor"]
             nHandles = len(iterations)
             for idx, struct in enumerate(self.trDataloader):        # iterate over patient cases
                 mris, dmap, seg, pcr, bbox, patientIDs = zip(*struct)
@@ -198,27 +199,30 @@ class MyTrainer():
                     target: torch.Tensor    = target.to(self.device, non_blocking=True)
                     patchIndices            = patchIndices.to(self.device)
 
+                    phases = DownsampleTensor(phases, 32)
+
                     with torch.autocast(self.device.type):
                         segOut, sharedFeatures, pcrOut = self.model(phases, patientIDs, patchIndices)
                         pcrLoss = None
                         if self.currentEpoch >= self.pretrainSegmentation and pcrOut is not None and self.joint:
                             pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
 
+                        segOut = UpsampleTensor(segOut, PATCH_SIZE)
                         segLoss: torch.Tensor = self.SegLoss(segOut, target, distMap)
 
-                        bceLoss = self.SegLoss.bc
-                        tvLoss = self.SegLoss.tv
+                        bceLoss = self.SegLoss.bc * self.SegLoss.BCWeight
+                        bdLoss = self.SegLoss.bd * self.SegLoss.BDWeight
+                        tvLoss = self.SegLoss.tv * self.SegLoss.TVWeight
 
                         # print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + BD Loss: {bdLoss:.4f}{f" + PCR Loss {pcrLoss:.4f}" if pcrLoss is not None else ""}", end='\r')
-                        print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Tversky Loss: {tvLoss:.4f}", end='\r')
-                        # print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: Loss = {segLoss:.4f}", end='\r')
+                        print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Tversky Loss: {tvLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
 
                     del phases, distMap, patchIndices
 
                     segLossesThisEpoch.append(segLoss.item())
                     bceLossesThisEpoch.append(bceLoss.item())
                     tvLossesThisEpoch.append(tvLoss.item())
-                    # bdLossesThisEpoch.append(bdLoss.item())
+                    bdLossesThisEpoch.append(bdLoss.item())
                     
                     # now only do foreground for "real" Dice score
                     segOut: torch.Tensor = (segOut > 0).int()
@@ -262,7 +266,7 @@ class MyTrainer():
             print()
             if self.writer:
                 self.writer.add_scalars('Seg Loss/Training', {"Overall": Mean(segLossesThisEpoch), 
-                                                            #   "Boundary": Mean(bdLossesThisEpoch),
+                                                              "Boundary": Mean(bdLossesThisEpoch),
                                                               "BCE": Mean(bceLossesThisEpoch),
                                                               "Tversky": Mean(tvLossesThisEpoch)}, self.currentEpoch)
                 
@@ -327,8 +331,9 @@ class MyTrainer():
                     segOut = torch.cat(allOuts, dim=1)
                     segLoss = valLoss(segOut, target, distMap)
 
-                    bceLoss = valLoss.bc
-                    tvLoss = valLoss.tv
+                    bceLoss = valLoss.bc * valLoss.BCWeight
+                    bdLoss = valLoss.bd * valLoss.BDWeight
+                    tvLoss = valLoss.tv * valLoss.TVWeight
 
                     segOut = segOut.detach().cpu()
 
@@ -338,15 +343,14 @@ class MyTrainer():
                 patchIndices = patchIndices.detach().cpu()
 
                 # print(f"\tValidation Batch {idx+1}/{nBatches}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + BD Loss: {bdLoss:.4f}{f" + PCR Loss {pcrLoss:.4f}" if pcrLoss is not None else ""}", end='\r')
-                print(f"\tValidation Batch {idx+1}/{nBatches}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Tversky Loss: {tvLoss:.4f}", end='\r')
-                # print(f"\tValidation Batch {idx+1}/{nBatches}: Loss = {segLoss:.4f}", end='\r')
+                print(f"\tValidation Batch {idx+1}/{nBatches}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Tversky Loss: {tvLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
 
                 del phases, distMap
                 
                 segLossesVal.append(segLoss.item())
                 bceLossesVal.append(bceLoss.item())
                 tvLossesVal.append(tvLoss.item())
-                # bdLossesVal.append(bdLoss.item())
+                bdLossesVal.append(bdLoss.item())
                 
                 segOut: torch.Tensor = (segOut > 0).int().detach().cpu()
                 target = target.detach().cpu()
@@ -398,7 +402,7 @@ class MyTrainer():
                 avgSegValLoss = Mean(segLossesVal)
                 
                 self.writer.add_scalars('Seg Loss/Validation', {"Overall": avgSegValLoss, 
-                                                            #   "Boundary": Mean(bdLossesVal),
+                                                              "Boundary": Mean(bdLossesVal),
                                                               "BCE": Mean(bceLossesVal),
                                                               "Tversky": Mean(tvLossesVal)}, self.currentEpoch)
 
@@ -651,11 +655,11 @@ if __name__ == "__main__":
     dataDir = rf"{os.environ.get("MAMAMIA_DATA")}/my_preprocessed_data/{datasetName}"
     # pretrainedDecoderPath = r"transformerResults\TransformerTSJointWithSkips\BestSegOct20-DownsampleImages.pth"
     pretrainedDecoderPath = None
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     cat = False
     pool = True
-    tag = f"Nov20-{'Cat' if cat else 'Add'}{'Pool' if pool else 'Cls'}TverskyAndBCE"
+    tag = f"Dec04-{'Cat' if cat else 'Add'}{'Pool' if pool else 'Cls'}AllLossesPatch64"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS
@@ -674,9 +678,9 @@ if __name__ == "__main__":
                   bottleneck=bottleneck)
     print(f"Set up model {modelName}")
 
-    trainer.train(continueTraining=True, modelName=f"BestSeg{tag}.pth")
-    # trainer.train()
-    # trainer.inference(f"Latest{tag}.pth", "Latest")
+    # trainer.train(continueTraining=True, modelName=f"BestSeg{tag}.pth")
+    trainer.train()
+    trainer.inference(f"Latest{tag}.pth", "Latest")
     if joint:
         trainer.inference(f"BestPCR{tag}.pth", "BestPCR")
     else:

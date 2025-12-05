@@ -174,7 +174,7 @@ def GetIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample:
             np.random.shuffle(indices)
         return indices
     
-    maxXYZ = [c - patchSize for c in imgShape]
+    maxXYZ = [max(c - patchSize, 1) for c in imgShape]
     minFG, maxFG = fgBox
     # adjust bounding box coordinates for on-the-fly downsampling
     minFG = [round(c / downsampleFactor) for c in minFG]
