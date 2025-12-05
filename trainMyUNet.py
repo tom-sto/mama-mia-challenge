@@ -181,17 +181,17 @@ class MyTrainer():
 
             # iterations = ["oversample", "oversample", "oversample", "no tumor", "no tumor", "no tumor"]
             # iterations = ["oversample", "oversample", "oversample", "no tumor", "no tumor"]
-            iterations = ["oversample", "oversample", "no tumor"]
+            iterations = ["oversample", "oversample", "no tumor"] if not self.test else ["oversample"] 
             nHandles = len(iterations)
             for idx, struct in enumerate(self.trDataloader):        # iterate over patient cases
                 mris, dmap, seg, pcr, bbox, patientIDs = zip(*struct)
                 rd.shuffle(iterations)
                 for i, it in enumerate(iterations):
                     if it == "oversample":
-                        args = [mris, dmap, seg, PATCH_SIZE, NUM_PATCHES, self.oversampleFG,
+                        args = [mris, dmap, seg, PATCH_SIZE * 2, NUM_PATCHES, self.oversampleFG,
                                 self.oversampleRadius, bbox, self.downsample, False]
                     else:
-                        args = [mris, dmap, seg, PATCH_SIZE, NUM_PATCHES, -1, 0, bbox, self.downsample, False]
+                        args = [mris, dmap, seg, PATCH_SIZE * 2, NUM_PATCHES, -1, 0, bbox, self.downsample, False]
                     phases, distMap, target, patchIndices = GetPatches(*args)
                     torch.cuda.empty_cache()
                     phases: torch.Tensor    = phases.transpose(1, 2).to(self.device, non_blocking=True)
@@ -199,7 +199,7 @@ class MyTrainer():
                     target: torch.Tensor    = target.to(self.device, non_blocking=True)
                     patchIndices            = patchIndices.to(self.device)
 
-                    phases = DownsampleTensor(phases, 32)
+                    phases = DownsampleTensor(phases, PATCH_SIZE)
 
                     with torch.autocast(self.device.type):
                         segOut, sharedFeatures, pcrOut = self.model(phases, patientIDs, patchIndices)
@@ -207,7 +207,7 @@ class MyTrainer():
                         if self.currentEpoch >= self.pretrainSegmentation and pcrOut is not None and self.joint:
                             pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
 
-                        segOut = UpsampleTensor(segOut, PATCH_SIZE)
+                        segOut = UpsampleTensor(segOut, PATCH_SIZE * 2)
                         segLoss: torch.Tensor = self.SegLoss(segOut, target, distMap)
 
                         bceLoss = self.SegLoss.bc * self.SegLoss.BCWeight
@@ -329,7 +329,7 @@ class MyTrainer():
                         del segOut
                 
                     segOut = torch.cat(allOuts, dim=1)
-                    segLoss = valLoss(segOut, target, distMap)
+                    segLoss = valLoss(segOut.float(), target, distMap)
 
                     bceLoss = valLoss.bc * valLoss.BCWeight
                     bdLoss = valLoss.bd * valLoss.BDWeight
@@ -494,7 +494,7 @@ class MyTrainer():
         scoreDF = None
         for struct in self.tsDataloader:
             phases, dmap, seg, pcr, bbox, patientIDs = zip(*struct)
-            phases, _, target, patchIndices = GetPatches(phases, dmap, seg, PATCH_SIZE, NUM_PATCHES, 0, 0, bbox, self.downsample, True)
+            phases, _, target, patchIndices = GetPatches(phases, dmap, seg, PATCH_SIZE // 2, NUM_PATCHES, 0, 0, bbox, self.downsample, True)
 
             torch.cuda.empty_cache()
             target: torch.Tensor    = target.int()
