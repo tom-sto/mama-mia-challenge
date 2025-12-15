@@ -37,9 +37,9 @@ class MyTrainer():
         self.currentEpoch = 0
         self.oversampleFG = 0.4
         self.oversampleRadius = 0.15
-        self.batchSize = 3
+        self.batchSize = 2
         self.clipGrad = False
-        self.downsample = 2
+        self.downsample = 4
 
         self.trainingCompose = GetTrainingTransforms()
         self.valTestCompose = GetNoTransforms()
@@ -72,7 +72,7 @@ class MyTrainer():
         nBottleneckLayers = 16
 
         self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
-                            expectedChannels=[1, 64, 128, 256, 320, 320],   #[1, 32, 64, 128, 256]
+                            expectedChannels=[1, 64, 128, 256, 384, 512],   #[1, 64, 128, 256, 320, 320]
                             expectedStride=[2, 2, 2, 2, 2],
                             pretrainedDecoderPath=pretrainedDecoderPath,
                             patientDataPath=self.patientDataPath,
@@ -87,7 +87,7 @@ class MyTrainer():
 
         dataTime = time()
         self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, self.patientDataPath, self.trainingCompose, self.valTestCompose,
-                                                                                 self.downsample, batchSize=self.batchSize, shuffle=True, test=self.test)
+                                                                                 batchSize=self.batchSize, shuffle=True, test=self.test)
         print(f"\tTook {FormatSeconds(time() - dataTime)}")
 
         # change optimizer and scheduler
@@ -131,7 +131,7 @@ class MyTrainer():
         # self.bcePosWeight = min(1 / (self.oversampleFG * x) - 1, 50) if self.oversampleFG != 0 else 19
         self.bcePosWeight = 100
         self.SegLoss = SegLoss(bcePosWeight=torch.tensor([self.bcePosWeight], device=device), downsample=self.downsample, 
-                               normalizeTV=False, alpha=0.95, beta=0.05)
+                               normalizeTV=False, alpha=0.99, beta=0.01)
 
     def train(self, continueTraining: bool = False, modelName: str = None):
         if continueTraining:
@@ -188,10 +188,10 @@ class MyTrainer():
                 rd.shuffle(iterations)
                 for i, it in enumerate(iterations):
                     if it == "oversample":
-                        args = [mris, dmap, seg, PATCH_SIZE * 2, NUM_PATCHES, self.oversampleFG,
-                                self.oversampleRadius, bbox, self.downsample, False]
+                        args = [mris, dmap, seg, PATCH_SIZE * self.downsample, NUM_PATCHES, self.oversampleFG,
+                                self.oversampleRadius, bbox, 1, False]
                     else:
-                        args = [mris, dmap, seg, PATCH_SIZE * 2, NUM_PATCHES, -1, 0, bbox, self.downsample, False]
+                        args = [mris, dmap, seg, PATCH_SIZE * self.downsample, NUM_PATCHES, -1, 0, bbox, 1, False]
                     phases, distMap, target, patchIndices = GetPatches(*args)
                     torch.cuda.empty_cache()
                     phases: torch.Tensor    = phases.transpose(1, 2).to(self.device, non_blocking=True)
@@ -207,7 +207,7 @@ class MyTrainer():
                         if self.currentEpoch >= self.pretrainSegmentation and pcrOut is not None and self.joint:
                             pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
 
-                        segOut = UpsampleTensor(segOut, PATCH_SIZE * 2)
+                        segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsample)
                         segLoss: torch.Tensor = self.SegLoss(segOut, target, distMap)
 
                         bceLoss = self.SegLoss.bc * self.SegLoss.BCWeight
@@ -276,7 +276,7 @@ class MyTrainer():
 
                 if self.currentEpoch % 10 == 0 and self.logGradients:
                     for name, param in self.model.named_parameters():
-                        if param.grad is not None and ('encoder' in name or 'bottleneck' in name or 'decoder'):
+                        if param.grad is not None and ('encoder' in name or 'bottleneck' in name or 'decoder' in name):
                             self.writer.add_histogram(f'Training Gradients/{name}', param.grad, self.currentEpoch)
 
             print(f"\tTraining loop took {FormatSeconds(time() - startEpoch)}")
@@ -302,12 +302,15 @@ class MyTrainer():
             for idx, struct in enumerate(self.vlDataloader):        # iterate over patient cases
                 mris, dmap, seg, pcr, bbox, patientIDs = zip(*struct)
                 truePCRs += [t.item() for t in pcr]
-                phases, distMap, target, patchIndices = GetPatches(mris, dmap, seg, PATCH_SIZE, NUM_PATCHES, 0, 0, bbox, self.downsample, True)
+                phases, distMap, target, patchIndices = GetPatches(mris, dmap, seg, PATCH_SIZE * self.downsample, 
+                                                                   NUM_PATCHES, 0, 0, bbox, 1, True)
                 torch.cuda.empty_cache()
                 phases: torch.Tensor    = phases.transpose(1, 2).to(self.device, non_blocking=True)
                 distMap: torch.Tensor   = distMap
                 target: torch.Tensor    = target.int()
                 patchIndices            = patchIndices.to(self.device)
+
+                phases = DownsampleTensor(phases, PATCH_SIZE)
 
                 with torch.autocast(self.device.type):
                     n = patchIndices.shape[1]
@@ -318,6 +321,7 @@ class MyTrainer():
                         segOut, _, pcrOut = self.model(phases[:, :, startI:stopI], patientIDs, patchIndices[:, startI:stopI])
                         pcrLoss = None
 
+                        segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsample)
                         allOuts.append(segOut.detach().cpu())
                         if self.currentEpoch >= self.pretrainSegmentation and pcrOut is not None and self.joint:
                             pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
@@ -361,8 +365,8 @@ class MyTrainer():
                 for i in range(len(patientIDs)):
                     dicePatches.append(Dice(segOut[i], target[i]))
 
-                    segImageArr     = ReconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE)
-                    targetImageArr  = ReconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE)
+                    segImageArr     = ReconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE * self.downsample)
+                    targetImageArr  = ReconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE * self.downsample)
                     
                     diceFull.append(Dice(segImageArr, targetImageArr))
                     tp, fp, tn, fn = tp_fp_tn_fn(segImageArr, targetImageArr)
@@ -494,13 +498,16 @@ class MyTrainer():
         scoreDF = None
         for struct in self.tsDataloader:
             phases, dmap, seg, pcr, bbox, patientIDs = zip(*struct)
-            phases, _, target, patchIndices = GetPatches(phases, dmap, seg, PATCH_SIZE // 2, NUM_PATCHES, 0, 0, bbox, self.downsample, True)
+            phases, _, target, patchIndices = GetPatches(phases, dmap, seg, PATCH_SIZE * self.downsample, 
+                                                         NUM_PATCHES, 0, 0, bbox, 1, True)
 
             torch.cuda.empty_cache()
             target: torch.Tensor    = target.int()
             phases: torch.Tensor    = phases.transpose(1, 2).to(self.device, dtype=DTYPE_PHASE, non_blocking=True)
             phase1: torch.Tensor    = phases[:, 1].float().detach().cpu()
             patchIndices            = patchIndices.to(self.device)
+
+            phases = DownsampleTensor(phases, PATCH_SIZE)
 
             with torch.autocast(self.device.type):
                 n = patchIndices.shape[1]
@@ -518,6 +525,8 @@ class MyTrainer():
                         del pcrOut
                     else:
                         segOut = x
+
+                    segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsample)
                     allOuts.append((segOut > 0).int().detach().cpu())
                     del segOut
             
@@ -529,9 +538,9 @@ class MyTrainer():
             patchIndices = patchIndices.detach().cpu()
             for i, patientID in enumerate(patientIDs):
                 dicePatches = Dice(segOut[i], target[i])
-                phaseImageArr   = ReconstructImageFromPatches(phase1[i], patchIndices[i], PATCH_SIZE)
-                segImageArr     = ReconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE)
-                targetImageArr  = ReconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE)
+                phaseImageArr   = ReconstructImageFromPatches(phase1[i], patchIndices[i], PATCH_SIZE * self.downsample)
+                segImageArr     = ReconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE * self.downsample)
+                targetImageArr  = ReconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE * self.downsample)
                 
                 dice = Dice(segImageArr, targetImageArr)
                 segMetrics = GetMetrics(*tp_fp_tn_fn(segImageArr, targetImageArr), "Seg")
@@ -659,7 +668,7 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     cat = False
     pool = True
-    tag = f"Dec04-{'Cat' if cat else 'Add'}{'Pool' if pool else 'Cls'}AllLossesPatch64"
+    tag = f"Dec15-{'Cat' if cat else 'Add'}{'Pool' if pool else 'Cls'}MoreEncoderDownsample4TV99"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS
@@ -678,7 +687,7 @@ if __name__ == "__main__":
                   bottleneck=bottleneck)
     print(f"Set up model {modelName}")
 
-    # trainer.train(continueTraining=True, modelName=f"BestSeg{tag}.pth")
+    # trainer.train(continueTraining=True, modelName=f"Latest{tag}.pth")
     trainer.train()
     trainer.inference(f"Latest{tag}.pth", "Latest")
     if joint:

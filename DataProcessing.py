@@ -308,10 +308,11 @@ def GetIndices(numPatches: int, patchSize: int, imgShape: list[int], oversample:
 
 def GetFullImageIndices(imageShape, patchSize, minOverlap):
     def ComputeIdealStride(imageSize, patchSize, minOverlap):
-        assert patchSize <= imageSize, "Patch must be smaller than or equal to image size"
+        if patchSize > imageSize:
+            return imageSize
         maxStride = patchSize - minOverlap
         numPatches = math.ceil((imageSize - patchSize) / maxStride) + 1
-        stride = (imageSize - patchSize) // (numPatches - 1) + 1 if numPatches > 1 else 0
+        stride = (imageSize - patchSize) // (numPatches - 1) + 1 if numPatches > 1 else imageSize
         return stride
     
     def ComputeAxisIndices(imageLen, patchLen, strideLen):
