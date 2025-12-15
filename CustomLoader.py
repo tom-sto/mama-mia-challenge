@@ -18,7 +18,7 @@ class CustomDataset(Dataset):
         patientID, numPhases = ind
         handle, pcr = self.data[numPhases][patientID]
         phaseArrs, dmapArr, segArr, bbox = handle()         # this is where we actually load data from disk
-        # ^^^ this is good because it lets torch handle pre-loading image with persistant workers
+        # ^^^ this is good because it lets torch handle pre-loading image with persistent workers
 
         phaseTensors = torch.from_numpy(phaseArrs).to(DTYPE_PHASE)
         phaseTensors = phaseTensors / phaseTensors.amax(dim=(1, 2, 3), keepdim=True)       # normalize each phase intensity here
