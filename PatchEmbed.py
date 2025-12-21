@@ -13,8 +13,7 @@ def init_weights_conv(module):
 class PatchEncoder(nn.Module):
     def __init__(self, channels: list[int], strides: list[int], dropout: float = 0.2, useSkips: bool = False):
         super().__init__()
-        self.encoder = nn.ModuleList([])
-        self.decoder = nn.ModuleList([])
+        self.mod = nn.ModuleList([])
         numBlocks = len(channels) - 1
 
         self.useSkips = useSkips
@@ -29,7 +28,7 @@ class PatchEncoder(nn.Module):
                 nn.ReLU(True),
                 nn.MaxPool3d(kernel_size=3, stride=strides[i], padding=1)
             )
-            self.encoder.append(encBlock)
+            self.mod.append(encBlock)
 
         self.init_weights()
 
@@ -42,7 +41,7 @@ class PatchEncoder(nn.Module):
         x = x.reshape(B * T * N, C, D, H, W)
 
         skips: list[torch.Tensor] = []
-        for i, block in enumerate(self.encoder):
+        for i, block in enumerate(self.mod):
             x = block(x)
             if self.useSkips:
                 unpatched = x.reshape(B, T, N, *x.shape[-4:])[:,1]          # reshape to [B, N, C, X, Y, Z], taking first post-contrast phase from T
@@ -62,19 +61,18 @@ class PatchEncoder(nn.Module):
         self.apply(init_weights_conv)
 
 class PatchDecoder(nn.Module):
-    def __init__(self, channels: list[int], catPosDecoder, useSkips: bool = False):
+    def __init__(self, channels: list[int], catPosDecoder: int, useSkips: bool = False):
         super().__init__()
         # print(f"DECODER CHANNELS: {channels}")
-        self.encoder = nn.ModuleList([])
-        self.decoder = nn.ModuleList([])
+        self.mod = nn.ModuleList([])
         numBlocks = len(channels) - 1
 
         self.useSkips = useSkips
         for i in range(numBlocks):
             if self.useSkips:
-                if i == 0 and catPosDecoder:
+                if i == 0 and catPosDecoder is not None:
                     decBlock = nn.Sequential(
-                        nn.ConvTranspose3d(3*channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
+                        nn.ConvTranspose3d(2*channels[-(i+1)] + catPosDecoder, channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
                         nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
                         nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
                         nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
@@ -87,9 +85,9 @@ class PatchDecoder(nn.Module):
                         nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
                     )
             else:
-                if i == 0 and catPosDecoder:
+                if i == 0 and catPosDecoder is not None:
                     decBlock = nn.Sequential(
-                        nn.ConvTranspose3d(2*channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
+                        nn.ConvTranspose3d(channels[-(i+1)] + catPosDecoder, channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
                         nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
                         nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
                         nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
@@ -102,20 +100,20 @@ class PatchDecoder(nn.Module):
                         nn.ReLU(True) if i < numBlocks - 1 else nn.Identity()
                     )
 
-            self.decoder.append(decBlock)
+            self.mod.append(decBlock)
         
         self.init_weights()
 
     def forward(self, x: torch.Tensor, skips: list[torch.Tensor] = None):
         # Decoder with skip connections
         if self.useSkips and skips:
-            for i, block in enumerate(self.decoder):
+            for i, block in enumerate(self.mod):
                 skip = skips[-(i + 1)]                      # Get corresponding skip connection
                 # print(f"\tDoing skips with x: {x.shape}, skip: {skip.shape}")
                 x = torch.cat((x, skip), dim=-4)            # Concatenate along channel dimension
                 x = block(x)
         else:
-            for block in self.decoder:
+            for block in self.mod:
                 x = block(x)
 
         return x    # output raw logits

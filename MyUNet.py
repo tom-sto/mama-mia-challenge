@@ -17,7 +17,7 @@ class MyUNet(torch.nn.Module):
                  nHeads: int = 8,
                  useSkips: bool = True,
                  joint: bool = True,
-                 catPosDecoder: bool = True,
+                 catPosDecoder: int = None,
                  pcrConfidence: bool = False,
                  bottleneck: str = "TransformerST",
                  nBottleneckLayers: int = 4,
@@ -68,13 +68,14 @@ class MyUNet(torch.nn.Module):
         E = sharedFeatures.shape[-1]
         pcrOut: torch.Tensor = self.classifier(sharedFeatures)       # [B, 1]
 
-        posEnc = PositionEncoding3D(patchIdxs, dim=E)     # [B, N, E]
-        if self.catPosDecoder:
+        if self.catPosDecoder is not None:
+            posEnc = PositionEncoding3D(patchIdxs, dim=self.catPosDecoder)              # [B, N, C]
             x = torch.cat([posEnc, sharedFeatures.unsqueeze(1).repeat(1, N, 1)], dim=-1)
-            x = x.reshape(-1, 2*E)[..., None, None, None]            # [B*N, E, 1, 1, 1]
+            x = x.reshape(-1, E + self.catPosDecoder)[..., None, None, None]            # [B*N, E + C, 1, 1, 1]
         else:
+            posEnc = PositionEncoding3D(patchIdxs, dim=E)           # [B, N, E]
             x = posEnc + sharedFeatures.unsqueeze(1).repeat(1, N, 1)
-            x = x.reshape(-1, E)[..., None, None, None]
+            x = x.reshape(-1, E)[..., None, None, None]             # [B*N, E, 1, 1, 1]
         segOut: torch.Tensor = self.decoder(x, skips)
         segOut = segOut.reshape(B, N, *segOut.shape[-3:])
 
