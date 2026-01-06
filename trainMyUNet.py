@@ -28,16 +28,16 @@ class MyTrainer():
         
         # Parameters to change!
         self.warmup = 0.01
-        self.cycles = 2
+        self.cycles = 4
         self.pretrainSegmentation = self.nEpochs * (1/self.cycles + self.warmup)        # pretrain for first LR annealing cycle
         # self.pretrainSegmentation = 0
         self.pcrConfidence = False
-        self.peakLR = 1e-5
+        self.peakLR = 4e-5
         self.minLR = 1e-7
         self.currentEpoch = 0
         self.oversampleFG = 0.4
         self.oversampleRadius = 0.15
-        self.batchSize = 10
+        self.batchSize = 8
         self.clipGrad = False
         self.downsamplePatch = 2
         self.downsampleImg = 2
@@ -119,7 +119,7 @@ class MyTrainer():
             cycle_steps=nCycleSteps,
             maxLR=self.peakLR,
             minLR=self.minLR,
-            damping=0.5
+            damping=0.9
         )
 
         self.PCRloss = PCRLoss() if not self.pcrConfidence else PCRLossWithConfidence()
@@ -671,27 +671,27 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     cat = 120
     pool = True
-    tag = f"Dec21-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}MoreEncoderDownsample4TV99"
+    tag = f"Jan02-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}MoreEncoderDownsample4TV99"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS
     # bottleneck = BOTTLENECK_TRANSFORMERST
     # bottleneck = BOTTLENECK_CONV
-    skips = False
+    skips = True
     joint = False
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=400, modelName=modelName, tag=tag, joint=joint, cat=cat, pool=pool, useJD=False, test=test)
+    trainer = MyTrainer(nEpochs=800, modelName=modelName, tag=tag, joint=joint, cat=cat, pool=pool, useJD=False, test=test)
     
     trainer.setup(dataDir, 
                   device, 
                   pretrainedDecoderPath=pretrainedDecoderPath, 
                   useSkips=skips, 
                   bottleneck=bottleneck)
-    print(f"Set up model {modelName}")
+    print(f"Set up model {modelName}/{tag}")
 
-    # trainer.train(continueTraining=True, modelName=f"Latest{tag}.pth")
-    trainer.train()
+    trainer.train(continueTraining=True, modelName=f"Latest{tag}.pth")
+    # trainer.train()
     trainer.inference(f"Latest{tag}.pth", "Latest")
     if joint:
         trainer.inference(f"BestPCR{tag}.pth", "BestPCR")
