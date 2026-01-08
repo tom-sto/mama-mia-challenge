@@ -274,7 +274,7 @@ class MySpatioTemporalTransformer(nn.Module):
         B, T, N, E, X, Y, Z = shape
         _, acqTimes = self.patientDataMod(shape, patientIDs, x.device)
         # patientDataEmb: torch.Tensor = patientDataEmb.permute(0, 2, 1, 3).reshape(B, -1, self.nPatientDataOutFeatures)      # [B, T*N*X*Y*Z, npatientDataOutFeatures]
-        acqTimes: torch.Tensor       = acqTimes.transpose(1, 2).reshape(B, -1)                                              # [B, T*N*X*Y*Z]
+        acqTimes: torch.Tensor = acqTimes.transpose(1, 2).reshape(B, -1)                                                    # [B, T*N*X*Y*Z]
 
         x = x.permute(0, 1, 2, 4, 5, 6, 3)          # [B, T, N, E, X, Y, Z] -> [B, T, N, X, Y, Z, E]; put T, N, X, Y, Z next to each other so they can be squished
         x = x.reshape(B, -1, E)                     # [B, T*N*X*Y*Z, E]
@@ -286,7 +286,7 @@ class MySpatioTemporalTransformer(nn.Module):
             x = torch.cat((tok, x), dim=1)                  # [B, 1 + T*N*X*Y*Z, E + npatientDataOutFeatures].
 
         timeSpaceIndices = torch.cat([acqTimes.unsqueeze(-1), patchIndices.repeat(1, T, 1)], dim=-1)
-        posEnc: torch.Tensor = PositionEncoding4D(timeSpaceIndices, dim = E)
+        posEnc: torch.Tensor = PositionEncoding4D(timeSpaceIndices, dim = E, normalize01=True)
 
         x[:, -T*N*X*Y*Z:] = x[:, -T*N*X*Y*Z:] + posEnc
         x = self.transformer(x)                     # [B, T*N*X*Y*Z (+1?), E + npatientDataOutFeatures]
@@ -342,32 +342,27 @@ class TransformerLayer(nn.Module):
 
     # Generic transformer layer that does attention and FFN on sequence S
     def forward(self, x: torch.Tensor):
-        B, S, _ = x.shape
-        
-        qkv: torch.Tensor = self.W_qkv(x)
-        qkv = qkv.reshape(B, S, 3, self.n_heads, self.d)            # [B, S, 3, H, d]
-        qkv = qkv.permute(2, 0, 1, 3, 4)                            # [3, B, H, S, d]
-        Q, K, V = qkv[0], qkv[1], qkv[2]                            # Each: [B, H, S, d]
+        B, S, E = x.shape
 
-        # Compute attention
-        scores = (Q @ K.transpose(-2, -1)) / (self.d ** 0.5)        # (B, h, S, S)
-        attn = torch.softmax(scores, dim=-1)                        # (B, h, S, S)
-        context = attn @ V                                          # (B, h, S, d)
+        qkv: torch.Tensor = self.W_qkv(x)           # [B, S, 3 * E]
+        qkv = qkv.view(B, S, 3, self.n_heads, self.d).permute(2, 0, 3, 1, 4).contiguous()
+        Q, K, V = qkv[0], qkv[1], qkv[2]
 
-        # Concatenate heads
-        context = context.permute(0, 2, 1, 3).contiguous()
-        context = context.view(B, S, -1)
+        context = nn.functional.scaled_dot_product_attention(
+            Q, K, V, 
+            dropout_p=self.dropout.p,
+        )
 
-        O: torch.Tensor = self.W_o(context)
-        x = x + O
+        # reshape back: [B, H, S, d] -> [B, S, E]
+        context = context.transpose(1, 2).reshape(B, S, E)
+
+        x = x + self.W_o(context)
         x = self.norm1(x)
         x = self.dropout1(x)
 
         # FFN
-        ffn_out = self.linear2(self.dropout(self.activation(self.linear1(x))))    # Linear -> ReLU -> Dropout -> Linear
-        ffn_out = self.dropout2(ffn_out)
-
-        x = x + ffn_out
+        ffn_out = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        x = x + self.dropout2(ffn_out)
         x = self.norm2(x)
 
         return x

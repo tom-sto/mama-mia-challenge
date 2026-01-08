@@ -27,21 +27,20 @@ class AttentionPooling(nn.Module):
         H, d = self.num_heads, self.head_dim
 
         # Project inputs to keys and values
-        q: torch.Tensor = self.query_proj(self.q_cls.repeat(*D, 1, 1))   # [..., 1, E] 
-        k: torch.Tensor = self.key_proj(x)              # [..., N, E]
-        v: torch.Tensor = self.value_proj(x)            # [..., N, E]
-
-        # Reshape for multi-head: [B, H, T, d]
-        q = q.view(*D, 1, H, d).transpose(-2, -3)       # [..., H, 1, d]
-        k = k.view(*D, N, H, d).transpose(-2, -3)       # [..., H, N, d]
-        v = v.view(*D, N, H, d).transpose(-2, -3)       # [..., H, N, d]
+        q: torch.Tensor = self.query_proj(self.q_cls.expand(*D, 1, E))   # [..., 1, E] 
+        k: torch.Tensor = self.key_proj(x)                          # [..., N, E]
+        v: torch.Tensor = self.value_proj(x)                        # [..., N, E]
+            
+        # Reshape for multi-head: [B, H, T, d]          
+        q = q.view(*D, 1, H, d).transpose(-2, -3).contiguous()      # [..., H, 1, d]
+        k = k.view(*D, N, H, d).transpose(-2, -3).contiguous()      # [..., H, N, d]
+        v = v.view(*D, N, H, d).transpose(-2, -3).contiguous()      # [..., H, N, d]
 
         # Scaled dot-product attention
-        attn_scores = (q @ k.transpose(-2, -1)) / (d ** 0.5)        # [B, N, H, 1, T]
-        attn_weights = torch.softmax(attn_scores, dim=-1)           # [B, N, H, 1, T]
-        pooled = attn_weights @ v                                   # [B, N, H, 1, d]
+        pooled = nn.functional.scaled_dot_product_attention(q, k, v)
 
-        pooled = pooled.squeeze(3).reshape(*D, E)                 # [..., E]
+        # Reshape back to [..., E]
+        pooled = pooled.transpose(-2, -3).reshape(*D, E)                 # [..., E]
 
         # Final projection
         return self.out_proj(pooled)

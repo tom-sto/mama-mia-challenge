@@ -93,16 +93,18 @@ def PositionEncoding3D(seq: torch.Tensor, dim: int):
     return posEnc
 
 # seq is tensor of indices: (T, X, Y, Z)
-def PositionEncoding4D(seq: torch.Tensor, dim: int):
+def PositionEncoding4D(seq: torch.Tensor, dim: int, normalize01: bool = False):
     assert dim % 8 == 0, f"Cannot encode 4D position unless d is divisble by 8! d: {dim}"
     t, x, y, z = seq[..., 0], seq[..., 1], seq[..., 2], seq[..., 3]
     d = dim // 4
-    tEnc = PositionEncoding(t, dim=d, div=100, scale=torch.pi*2)
+    tEnc = PositionEncoding(t, dim=d, div=1000)
     xEnc = PositionEncoding(x, dim=d, div=1000)
     yEnc = PositionEncoding(y, dim=d, div=1000)
     zEnc = PositionEncoding(z, dim=d, div=1000)
 
     posEnc = torch.cat([tEnc, xEnc, yEnc, zEnc], dim=-1)
+    if normalize01:
+        return (posEnc + posEnc.min()) / (posEnc.max() - posEnc.min())
     return posEnc
 
 def CleanPatientData(df: pd.DataFrame, 

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 def init_weights_conv(module):
     if isinstance(module, nn.Conv3d):
@@ -41,12 +42,17 @@ class PatchEncoder(nn.Module):
         x = x.reshape(B * T * N, C, D, H, W)
 
         skips: list[torch.Tensor] = []
-        for i, block in enumerate(self.mod):
-            x = block(x)
-            if self.useSkips:
-                unpatched = x.reshape(B, T, N, *x.shape[-4:])[:,1]          # reshape to [B, N, C, X, Y, Z], taking first post-contrast phase from T
-                unpatched = unpatched.reshape(-1, *unpatched.shape[2:])     # merge the batch and patch dimensions to [B*N, C, X, Y, Z]
-                skips.append(unpatched)        
+        def run_encoder(t: torch.Tensor):
+            for i, block in enumerate(self.mod):
+                t = block(t)
+                if self.useSkips:
+                    unpatched = t.reshape(B, T, N, *t.shape[-4:])[:,1]          # reshape to [B, N, C, X, Y, Z], taking first post-contrast phase from T
+                    unpatched = unpatched.reshape(-1, *unpatched.shape[2:])     # merge the batch and patch dimensions to [B*N, C, X, Y, Z]
+                    skips.append(unpatched)
+            return t
+        
+        # Use checkpointing on the encoder
+        x = checkpoint(run_encoder, x, use_reentrant=False)
 
         _, E, X, Y, Z = x.shape
         assert X == Y == Z == 1, f"Expected spatial dims to reduce to 1, got {X} x {Y} x {Z}"

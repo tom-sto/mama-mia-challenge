@@ -28,7 +28,6 @@ class MyUNet(torch.nn.Module):
         if not useSkips:
             # [1, 96, 192, 384, 576, 864]
             expectedChannels = [1] + [round(i * 1.5) for i in expectedChannels[1:]]
-            
         
         self.encoder = PatchEncoder(expectedChannels, expectedStride, dropout=0, useSkips=useSkips)
         self.decoder = PatchDecoder(expectedChannels, catPosDecoder, useSkips=useSkips)
