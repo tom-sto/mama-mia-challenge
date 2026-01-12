@@ -295,11 +295,6 @@ class MySpatioTemporalTransformer(nn.Module):
             x = self.poolTokens(x)            # [B, E + npatientDataOutFeatures]
         else:
             x = x[:, 0]                         # [B, E + npatientDataOutFeatures]
-        
-        # print(f"Shape after attention pooling: {x.shape}")
-       
-        # x = self.fcToPatches(x)  # [B, E]
-
         return x
 
 class Transformer(nn.Module):

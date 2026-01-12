@@ -76,7 +76,8 @@ class MyTrainer():
         nBottleneckLayers = 16
 
         self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
-                            expectedChannels=[1, 96, 192, 384, 768, 1024],   #[1, 64, 128, 256, 384, 512]
+                            # expectedChannels=[1, 96, 192, 384, 768, 1024],
+                            expectedChannels=[1, 64, 128, 256, 384, 512],
                             expectedStride=[2, 2, 2, 2, 2],
                             pretrainedDecoderPath=pretrainedDecoderPath,
                             patientDataPath=self.patientDataPath,
@@ -159,16 +160,6 @@ class MyTrainer():
         for epoch in range(startEpoch, self.nEpochs):
             self.currentEpoch = epoch
             print(f"Epoch {self.currentEpoch}:")
-
-            # halfway through training, make BoundayLoss have more weight
-            # and BCE loss have less weight to stop over-predicting
-            if self.currentEpoch == self.nEpochs // 2:
-                self.SegLoss.BDWeight = self.SegLoss.BDWeight * 2
-                self.SegLoss.BCLoss.pos_weight = self.bcePosWeightBalanced
-
-                # also run inference for a good health check
-                self.inference(f"Latest{self.tag}.pth", "Latest", f"predSegmentationsEpoch{self.currentEpoch}")
-                
 
             # =========================================
             #               TRAINING LOOP
@@ -506,19 +497,16 @@ class MyTrainer():
         print("Running inference!")
         scoreDF = None
         for struct in self.tsDataloader:
-            phases, dmap, seg, pcr, bbox, patientIDs = zip(*struct)
-            phases, _, target, patchIndices = GetPatches(phases, dmap, seg, PATCH_SIZE * self.downsamplePatch, 
-                                                         NUM_PATCHES, 0, 0, bbox, self.downsampleImg, True)
-
-            torch.cuda.empty_cache()
-            target: torch.Tensor    = target.int()
-            phases: torch.Tensor    = phases.transpose(1, 2).to(self.device, dtype=DTYPE_PHASE, non_blocking=True)
-            phase1: torch.Tensor    = phases[:, 1].float().detach().cpu()
-            patchIndices            = patchIndices.to(self.device)
+            mris, dmap, seg, pcr, bbox, patientIDs = zip(*struct)
+            phases, _, target, patchIndices = GetPatches(mris, dmap, seg, PATCH_SIZE * self.downsamplePatch, 
+                                                                   NUM_PATCHES, 0, 0, bbox, self.downsampleImg, True)
+            phases: torch.Tensor    = phases.transpose(1, 2).to(self.device, non_blocking=True)
+            phase1: torch.Tensor    = phases[:, 1].float().cpu()
+            patchIndices            = patchIndices.to(self.device, non_blocking=True)
 
             phases = DownsampleTensor(phases, PATCH_SIZE)
 
-            with torch.autocast(self.device.type):
+            with torch.no_grad(), torch.autocast(self.device.type):
                 n = patchIndices.shape[1]
                 allOuts = []
                 allPCRs = []
@@ -528,18 +516,16 @@ class MyTrainer():
                     if self.joint:
                         segOut, _, pcrOut = x
                         if self.pcrConfidence:
-                            allPCRs.append((torch.sigmoid(pcrOut[0]) * torch.sigmoid(pcrOut[1])).detach().cpu())
+                            allPCRs.append((torch.sigmoid(pcrOut[0] * torch.sigmoid(pcrOut[1]))).squeeze(dim=-1))
                         else:
-                            allPCRs.append(torch.sigmoid(pcrOut).detach().cpu())
-                        del pcrOut
+                            allPCRs.append(pcrOut.squeeze(dim=-1))
                     else:
-                        segOut = x
-
-                    segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
-                    allOuts.append((segOut > 0).int().detach().cpu())
-                    del segOut
+                        allOuts.append(x)
             
             segOut = torch.cat(allOuts, dim=1)
+            segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
+            segOut: torch.Tensor = (segOut > 0).int().cpu()
+            
             if self.joint:
                 pcrOut = torch.cat(allPCRs, dim=-1)
                 pcrOut = pcrOut.mean(dim=-1)
@@ -697,7 +683,7 @@ if __name__ == "__main__":
 
     # trainer.train(continueTraining=True, modelName=f"Latest{tag}.pth")
     trainer.train()
-    trainer.inference(f"Latest{tag}.pth", "Latest")
+    # trainer.inference(f"Latest{tag}.pth", "Latest")
     if joint:
         trainer.inference(f"BestPCR{tag}.pth", "BestPCR")
     else:
