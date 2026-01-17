@@ -2,54 +2,132 @@ import torch
 from torch import nn
 import pandas as pd
 
+class RiskFactorPrediction(nn.Module):
+    def __init__(self, patientDataDF: pd.DataFrame, embDim: int, featureDim: int):
+        super().__init__()
+        self.patientDataDF = patientDataDF
+        self.hiddenDim = 256
+        self.outDim = featureDim
+
+        self.pred = nn.Sequential(
+            nn.LayerNorm(embDim),
+            nn.Linear(embDim, self.hiddenDim),
+            nn.LayerNorm(self.hiddenDim),
+            nn.ReLU(),
+            # nn.Dropout(),
+            nn.Linear(self.hiddenDim, self.outDim)
+        )
+
+        self.lossCat = nn.BCEWithLogitsLoss()
+        self.lossCont = nn.MSELoss()
+
+    def forward(self, latent: torch.Tensor):
+        return self.pred(latent.flatten(1))      # [B, E] -> [B, 45]
+    
+    def maskRiskFactors(self, riskFactors: list[torch.Tensor], pred: torch.Tensor, continuousIndices: list[int] = [0]):
+        mask = [(x != 0).any().item() for x in riskFactors]
+        mask[0] = (riskFactors[0] != -1).any().item()       # only Age is not one-hot encoded, so look for missing value of -1
+        loss = []
+        out = []
+        idx = 0
+        for i, factor in enumerate(riskFactors):
+            l = len(factor)
+            x = pred[idx:idx+l]
+
+            if mask[i] == 0:
+                out.append(torch.sigmoid(x))                # use sigmoid of prediction to act as "one-hot" encoding
+            else:
+                out.append(factor + (x - x.detach()))       # reparameterize w.r.t. x to not break gradient flow
+                if i in continuousIndices:
+                    loss.append(self.lossCont(torch.sigmoid(x), factor))
+                else:
+                    loss.append(self.lossCat(x, factor))
+            idx += l
+
+        return torch.cat(out, dim=-1), torch.stack(loss).mean() if len(loss) else None
+
 class PatientDataEncoding(nn.Module):
-    def __init__(self, nHeads, patientDataPath):
+    def __init__(self, patientDataPath, embDim):
         super().__init__()
         self.ageMin = 21
         self.ageMax = 77
         self.patientDataDF = pd.read_excel(patientDataPath, sheet_name="dataset_info")
 
-        nPatientDataInFeatures = 7             # 1 for age (linear), 2 for menopausal status (one-hot), 4 for breast density (one-hot)
-        self.nPatientDataOutFeatures = nHeads         # needs to be divisible by nHeads
-        self.patientDataEmbed = nn.Linear(nPatientDataInFeatures, self.nPatientDataOutFeatures)
+        self.inFeatures = 45             # one-hot encoding for most variables, continuous for age
+        self.outFeatures = 64
+        self.patientDataEmbed = nn.Linear(self.inFeatures, self.outFeatures)
 
         self.ageEncode  = lambda x: torch.tensor([(x - self.ageMin) / (self.ageMax - self.ageMin)], dtype=torch.float32) if x is not None \
-            else torch.tensor([0.5], dtype=torch.float32)   # normalize age to [0, 1] range, default to 0.5 if None
-        self.menoEncode = lambda x: torch.tensor([1, 0]) if x == "pre" \
-            else torch.tensor([0, 1]) if x == "post" \
-            else torch.tensor([0, 0])
-        self.densityEncode = lambda x: torch.tensor([1, 0, 0, 0]) if x == "a" \
-            else torch.tensor([0, 1, 0, 0]) if x == "b" \
-            else torch.tensor([0, 0, 1, 0]) if x == "c" \
-            else torch.tensor([0, 0, 0, 1]) if x == "d" \
-            else torch.tensor([0, 0, 0, 0])
+            else torch.tensor([-1], dtype=torch.float32)   # normalize age to [0, 1] range, default to 0.5 if None
+        self.binaryEncode = lambda x: torch.tensor([x==0, x==1], dtype=torch.float)
+        self.menoEncode = lambda x: torch.tensor([x=="pre", x=="post"], dtype=torch.float)
 
-    def forward(self, shape: tuple[int], patientIDs: list[str], device: torch.device):
-        B, T, N, E, X, Y, Z = shape
+        nottinghamGrades = ["low", "intermediate", "high"]
+        self.nottEncode = lambda x: torch.tensor([n in str(x) for n in nottinghamGrades], dtype=torch.float)
+        
+        densities = ["a", "b", "c", "d"]
+        self.densityEncode = lambda x: torch.tensor([d in str(x) for d in densities], dtype=torch.float)
+        
+        tumorSubtypes = ["her2_pure", "her2_enriched", "triple negative", "luminal"]
+        self.tumorEncode = lambda x: torch.tensor([t in str(x) for t in tumorSubtypes], dtype=torch.float)
+        
+        bmiClasses = ["underweight", "normal", "overweight", "obesity_class_1", "obesity_class_2", "obesity_class_3"]
+        self.bmiEncode = lambda x: torch.tensor([b in str(x) for b in bmiClasses], dtype=torch.float)
+        
+        nacAgents = ["ABT 888", "AMG 386", "Anthracycline", "Carboplatin", "FEC100", "Ganetespib", "Ganitumab", "MK-2206", 
+                     "Neratinib", "Paclitaxel", "Pembrolizumab", "Pertuzumab", "T-DM1", "Taxane", "Trastuzumab"]
+        self.nacEncode = lambda x: torch.tensor([a in str(x) for a in nacAgents], dtype=torch.float)
 
-        patientDataEmb = torch.empty(B, N*X*Y*Z, T, self.nPatientDataOutFeatures, device=device)      # [B*N*X*Y*Z, T, npatientDataOutFeatures]
-        acqTimesTensor = torch.zeros(B, N*X*Y*Z, T, device=device)
+        self.riskFactorPred = RiskFactorPrediction(self.patientDataDF, embDim, self.inFeatures)
 
-        patientData = CleanPatientData(self.patientDataDF, patientIDs)
+    def forward(self, x: torch.Tensor, patientIDs: list[str]):
+        patientData = CleanPatientData(self.patientDataDF, patientIDs, columns=[
+            'age', 'anti_her2_neu_therapy', 'er', 'hr', 'pr', 'menopause', 'multifocal_cancer',
+            'nottingham_grade', 'breast_density', 'tumor_subtype', 'bmi_group', 'nac_agent'
+        ])
 
+        preds = self.riskFactorPred(x)
+        loss = []
+        encodingTensors = []
         for idx, md in enumerate(patientData):
-            age = md['age']
-            menopausal_status = md['menopause']
-            breast_density = md['breast_density']
-            ageEmb = self.ageEncode(age).to(device)
-            menoEmb = self.menoEncode(menopausal_status).to(device)
-            densityEmb = self.densityEncode(breast_density).to(device)
-            concat = torch.cat((ageEmb, menoEmb, densityEmb)).unsqueeze(0)      # [1, npatientDataInFeatures]
-            concat: torch.Tensor = self.patientDataEmbed(concat)                # [1, npatientDataOutFeatures]
-            patientDataEmb[idx] = concat.expand(N*X*Y*Z, T, -1)                 # [B, N*X*Y*Z, T, npatientDataOutFeatures]
+            age = self.ageEncode(md['age'])
+            antiHER2 = self.binaryEncode(md['anti_her2_neu_therapy'])
+            er = self.binaryEncode(md['er'])
+            hr = self.binaryEncode(md['hr'])
+            pr = self.binaryEncode(md['pr'])
+            meno = self.menoEncode(md['menopause'])
+            multifocal = self.binaryEncode(md['multifocal_cancer'])
+            nott = self.nottEncode(md['nottingham_grade'])
+            density = self.densityEncode(md['breast_density'])
+            subtype = self.tumorEncode(md['tumor_subtype'])
+            bmi = self.bmiEncode(md['bmi_group'])
+            nac = self.nacEncode(md['nac_agent'])
 
+            encodings = [age, antiHER2, er, hr, pr, meno, multifocal, nott, density, subtype, bmi, nac]
+            encodings = [t.to(x.device) for t in encodings]
+
+            # RISK FACTOR PREDICTION
+            encodings, l = self.riskFactorPred.maskRiskFactors(encodings, preds[idx])
+            if l is not None: loss.append(l)         # accumulate prediction loss
+            encodingTensors.append(encodings)
+
+        embeddings: torch.Tensor = self.patientDataEmbed(torch.stack(encodingTensors))      #[B, outFeatures]
+
+        return embeddings, torch.stack(loss).mean() if len(loss) else 0
+    
+    def AcquisitionTimes(self, shape: tuple[int], patientIDs: list[str], device: torch.device):
+        B, T, N, E, X, Y, Z = shape
+        acqTimesTensor = torch.zeros(B, N*X*Y*Z, T, device=device)
+        patientData = CleanPatientData(self.patientDataDF, patientIDs, columns=["acquisition_times"])
+        for idx, md in enumerate(patientData):
             acqTimes = md["acquisition_times"]
             if acqTimes is not None:
                 acqTimes = acqTimes[:T]
                 assert len(acqTimes) == T, f"Expected acquisition times to match num phases: {T}, got {len(acqTimes)}"
                 acqTimesTensor[idx] = torch.tensor(acqTimes).expand(N*X*Y*Z, -1)
 
-        return patientDataEmb, acqTimesTensor
+        return acqTimesTensor
+
 
 # adapted from PE formula in Viswani et. al. (2023)
 def PositionEncoding(seq: torch.Tensor, dim: int, div=10_000, scale=None):
@@ -121,7 +199,8 @@ def CleanPatientData(df: pd.DataFrame,
 
         return df
 
-    df = cleanMenopause(df)
+    if "menopause" in columns:
+        df = cleanMenopause(df)
 
     data = []
     for pid in patient_ids:

@@ -3,8 +3,8 @@ import torch.nn.functional as F
 
 IMAGE_TYPES = ("phase", "seg", "dmap")
 PATCH_SIZE  = 32
-NUM_PATCHES = 5
-CHUNK_SIZE  = NUM_PATCHES
+NUM_PATCHES = 10
+CHUNK_SIZE  = 132
 
 ACQ_TIME_THRESHOLD = 750
 MIN_NUM_PHASES = 3
@@ -21,6 +21,9 @@ BOTTLENECK_CONV = "Conv"
 BOTTLENECK_NONE = "None"
 
 EPS = 1e-3
+
+MODE_SEG = 0
+MODE_PCR = 1
 
 def Mean(l: list):
     if len(l) == 0:

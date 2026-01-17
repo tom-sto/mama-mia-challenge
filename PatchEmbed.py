@@ -46,7 +46,7 @@ class PatchEncoder(nn.Module):
             for i, block in enumerate(self.mod):
                 t = block(t)
                 if self.useSkips:
-                    unpatched = t.reshape(B, T, N, *t.shape[-4:])[:,1]          # reshape to [B, N, C, X, Y, Z], taking first post-contrast phase from T
+                    unpatched = t.reshape(B, T, N, *t.shape[-4:])[:,min(T-1, 1)]          # reshape to [B, N, C, X, Y, Z], taking first post-contrast phase from T
                     unpatched = unpatched.reshape(-1, *unpatched.shape[2:])     # merge the batch and patch dimensions to [B*N, C, X, Y, Z]
                     skips.append(unpatched)
             return t

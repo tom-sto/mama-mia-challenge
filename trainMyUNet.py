@@ -5,11 +5,9 @@ import matplotlib.pyplot as plt
 import SimpleITK as sitk
 from time import time
 from torch.utils.tensorboard import SummaryWriter
-from torchjd.aggregation import UPGrad
-from torchjd import mtl_backward
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, roc_curve, average_precision_score
 from MyUNet import MyUNet
-from Losses import PCRLoss, PCRLossWithConfidence, SegLoss, Dice, tp_fp_tn_fn, GetMetrics
+from Losses import PCRLoss, SegLoss, Dice, tp_fp_tn_fn, GetMetrics
 from Schedulers import WarmupCosineAnnealingWithRestarts
 from CustomLoader import GetDataloaders
 from DataProcessing import ReconstructImageFromPatches, GetPatches
@@ -17,28 +15,26 @@ from helpers import *
 from Augmenter import GetNoTransforms, GetTrainingTransforms
 
 class MyTrainer():
-    def __init__(self, nEpochs: int, modelName: str = "", tag: str = "", joint: bool = True, cat: bool = True, stopEarly: int = None, 
-                 pool: bool = False, useJD: bool = False, patientDataPath="clinical_and_imaging_info.xlsx", test: bool = False):
+    def __init__(self, nEpochs: int, modelName: str = "", tag: str = "", mode: int = 0, cat: bool = True, stopEarly: int = None, 
+                 pool: bool = False, patientDataPath="clinical_and_imaging_info.xlsx", test: bool = False):
         self.nEpochs = nEpochs
         self.stopAfterPlateauEpochs = stopEarly if stopEarly else 10_000_000
-        self.joint = joint
+        self.mode = mode
         self.cat = cat
         self.pool = pool
-        self.useJD = useJD
         
         # Parameters to change!
         self.warmup = 0.01
         self.cycles = 2
-        self.pretrainSegmentation = self.nEpochs * (1/self.cycles + self.warmup)        # pretrain for first LR annealing cycle
-        # self.pretrainSegmentation = 0
-        self.pcrConfidence = False
-        self.peakLR = 4e-5
-        self.minLR = 8e-6
+        # self.pretrainSegmentation = self.nEpochs * (1/self.cycles + self.warmup)        # pretrain for first LR annealing cycle
+        self.pretrainSegmentation = 0
+        self.peakLR = 5e-6
+        self.minLR = 1e-7
         self.currentEpoch = 0
         self.oversampleFG = 0.5
         self.oversampleRadius = 0.15
         self.batchSize = 20
-        self.clipGrad = False
+        self.clipGrad = True
         self.downsamplePatch = 2
         self.downsampleImg = 2
 
@@ -83,9 +79,8 @@ class MyTrainer():
                             patientDataPath=self.patientDataPath,
                             nHeads=nHeads,
                             useSkips=useSkips,
-                            joint=self.joint,
+                            mode=self.mode,
                             catPosDecoder=self.cat,
-                            pcrConfidence=self.pcrConfidence,
                             bottleneck=bottleneck,
                             nBottleneckLayers=nBottleneckLayers,
                             useAttentionPooling=self.pool).to(device)
@@ -100,16 +95,15 @@ class MyTrainer():
         if pretrainedDecoderPath:
             decoderLRWeight = 0.1
         
-        self.optimizer = torch.optim.AdamW([
-            {'params': self.model.encoder.parameters(), 'lr': self.minLR * 50, 'weight_decay': 1e-4},
-            {'params': self.model.bottleneck.parameters(), 'lr': self.minLR, 'weight_decay': 1e-5},
-            {'params': self.model.decoder.parameters(), 'lr': self.minLR * decoderLRWeight,  'weight_decay': 1e-4},
-            {'params': self.model.classifier.parameters(), 'lr': self.minLR * 10,  'weight_decay': 1e-3}
-        ])
-        # self.optimizer = torch.optim.AdamW(params=self.model.parameters(), lr=self.minLR, weight_decay=1e-4)
+        # self.optimizer = torch.optim.AdamW([
+        #     {'params': self.model.encoder.parameters(), 'lr': self.minLR * 50, 'weight_decay': 1e-4},
+        #     {'params': self.model.bottleneck.parameters(), 'lr': self.minLR, 'weight_decay': 1e-5},
+        #     {'params': self.model.decoder.parameters(), 'lr': self.minLR * decoderLRWeight,  'weight_decay': 1e-4},
+        #     {'params': self.model.classifier.parameters(), 'lr': self.minLR * 10,  'weight_decay': 1e-3}
+        # ])
+        self.optimizer = torch.optim.AdamW(params=self.model.parameters(), lr=self.minLR)
 
         self.gradScaler = torch.GradScaler(device.type)
-        self.aggregator = UPGrad()
 
         nWarmupSteps = round(self.warmup * self.nEpochs)
         nCycleSteps = round((1 - self.warmup) * self.nEpochs / self.cycles) + 1
@@ -123,7 +117,7 @@ class MyTrainer():
             damping=0.7
         )
 
-        self.PCRloss = PCRLoss() if not self.pcrConfidence else PCRLossWithConfidence()
+        self.PCRloss = PCRLoss()
 
         # bce pos_weight should be close to the ratio of background to foreground in segmentations
         # since we oversample, we know some percentage of patches will have foreground
@@ -148,10 +142,8 @@ class MyTrainer():
         startEpoch = self.currentEpoch
         bestSeg = 0.
         bestPCR = 1000.
-        bestJoint = 1000.
 
         bestSegEpoch = self.currentEpoch
-        bestJointEpoch = self.currentEpoch
 
         import numpy.random as rd
         rd.seed(1234)
@@ -170,7 +162,10 @@ class MyTrainer():
             tvLossesThisEpoch = []
             segLossesThisEpoch = []
             pcrLossesThisEpoch = []
+            rfpLossesThisEpoch = []
             diceThisEpoch = []
+            truePCRs = []
+            predPCRs = []
 
             lr = self.optimizer.param_groups[0]["lr"]
             if self.writer:
@@ -181,9 +176,8 @@ class MyTrainer():
             startEpoch = time()
             nBatches = len(self.trDataloader)
 
-            # iterations = ["oversample", "oversample", "oversample", "no tumor", "no tumor", "no tumor"]
-            # iterations = ["oversample", "oversample", "oversample", "no tumor", "no tumor"]
-            iterations = ["oversample", "oversample", "no tumor"] if not self.test else ["oversample"] 
+            # iterations = ["oversample", "oversample", "no tumor"] if not self.test else ["oversample"]
+            iterations = ["oversample", "oversample"]
             nHandles = len(iterations)
             for idx, struct in enumerate(self.trDataloader):        # iterate over patient cases
                 mris, dmap, seg, pcr, bbox, patientIDs = zip(*struct)
@@ -202,83 +196,93 @@ class MyTrainer():
 
                     phases = DownsampleTensor(phases, PATCH_SIZE)
 
-                    with torch.autocast(self.device.type):
-                        segOut, sharedFeatures, pcrOut = self.model(phases, patientIDs, patchIndices)
-                        pcrLoss = None
-                        if self.currentEpoch >= self.pretrainSegmentation and pcrOut is not None and self.joint:
-                            pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
+                    with torch.autocast(self.device.type, dtype=torch.float16):
+                        out = self.model(phases, patientIDs, patchIndices, DownsampleTensor(target, PATCH_SIZE))
+                        loss = None
+                        if self.mode == MODE_PCR:
+                            out, rfpLoss = out
+                            pcrLoss: torch.Tensor = self.PCRloss(out, pcr)
+                            loss = pcrLoss + rfpLoss
+                            truePCRs.append(torch.stack(pcr))
+                            predPCRs.append(out.squeeze())
 
-                        segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
-                        segLoss: torch.Tensor = self.SegLoss(segOut, target, distMap)
+                            pcrLossesThisEpoch.append(loss.item())
+                            bceLossesThisEpoch.append(pcrLoss.item())
+                            rfpLossesThisEpoch.append(rfpLoss.item())
 
-                        bceLoss = self.SegLoss.bc * self.SegLoss.BCWeight
-                        bdLoss = self.SegLoss.bd * self.SegLoss.BDWeight
-                        tvLoss = self.SegLoss.tv * self.SegLoss.TVWeight
+                            print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {loss:.4f} = PCR Loss {pcrLoss:.4f} + RFP Loss {rfpLoss:.4f}", end='\r')
 
-                        # print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + BD Loss: {bdLoss:.4f}{f" + PCR Loss {pcrLoss:.4f}" if pcrLoss is not None else ""}", end='\r')
-                        print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Tversky Loss: {tvLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
+                        elif self.mode == MODE_SEG:
+                            out = UpsampleTensor(out, PATCH_SIZE * self.downsamplePatch)
+                            loss: torch.Tensor = self.SegLoss(out, target, distMap)
+
+                            bceLoss = self.SegLoss.bc * self.SegLoss.BCWeight
+                            bdLoss = self.SegLoss.bd * self.SegLoss.BDWeight
+                            tvLoss = self.SegLoss.tv * self.SegLoss.TVWeight
+
+                            segLossesThisEpoch.append(loss.item())
+                            bceLossesThisEpoch.append(bceLoss.item())
+                            tvLossesThisEpoch.append(tvLoss.item())
+                            bdLossesThisEpoch.append(bdLoss.item())
+
+                            out: torch.Tensor = (out > 0).int()
+                            dice = Dice(out.detach().cpu(), target.detach().cpu())
+                            diceThisEpoch.append(dice)
+
+                            print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {loss:.4f} = BCE Loss: {bceLoss:.4f} + Tversky Loss: {tvLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
 
                     del phases, distMap, patchIndices
 
-                    segLossesThisEpoch.append(segLoss.item())
-                    bceLossesThisEpoch.append(bceLoss.item())
-                    tvLossesThisEpoch.append(tvLoss.item())
-                    bdLossesThisEpoch.append(bdLoss.item())
-                    
-                    # now only do foreground for "real" Dice score
-                    segOut: torch.Tensor = (segOut > 0).int()
-                    dice = Dice(segOut.detach().cpu(), target.detach().cpu())
-                    diceThisEpoch.append(dice)
-
                     # free as much space as possible before backward()
-                    del segOut, pcrOut, target
+                    del out, target
                     
                     self.optimizer.zero_grad()
-                    if self.joint and pcrLoss and not pcrLoss.isnan().any():
-                        if self.useJD:
-                            assert sharedFeatures is not None, "Cannot do joint backward without shared features!"
-                            pcrLossesThisEpoch.append(pcrLoss.item())
-
-                            losses = self.gradScaler.scale([segLoss, pcrLoss])
-                            mtl_backward(losses=losses, 
-                                        features=sharedFeatures, 
-                                        aggregator=self.aggregator,
-                                        tasks_params=[list(self.model.decoder.parameters()), 
-                                                      list(self.model.classifier.parameters())],
-                                        shared_params=list(self.model.encoder.parameters()) + 
-                                                      list(self.model.bottleneck.parameters()))
-                        else:
-                            scaledLoss = self.gradScaler.scale(segLoss + pcrLoss)
-                            scaledLoss.backward()
-                    else:
-                        scaledLoss = self.gradScaler.scale(segLoss)
-                        scaledLoss.backward()
+                    scaledLoss = self.gradScaler.scale(loss)
+                    scaledLoss.backward()
                     
                     if self.clipGrad:
                         self.gradScaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=12.)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.)
                     
                     self.gradScaler.step(self.optimizer)
                     self.gradScaler.update()
 
-                    del segLoss, pcrLoss, sharedFeatures
+                    del loss
                 del mris, dmap, seg, pcr
             torch.cuda.empty_cache()
 
+            if self.mode == MODE_PCR:
+                predPCRs = torch.cat(predPCRs).detach().float().cpu().numpy()
+                truePCRs = torch.cat(truePCRs).int().cpu().numpy()
+
+                # Mask out invalid entries
+                mask = truePCRs != -1
+                truePCRs_masked = truePCRs[mask]
+                predPCRs_masked = predPCRs[mask]
+
+                # Now compute AUC only on valid entries
+                fpr, sens, _ = roc_curve(truePCRs_masked, predPCRs_masked)
+                spec = 1 - fpr
+                i = np.argmax(spec + sens - 1)
+                trSens = sens[i]
+                trSpec = spec[i]
+                trAuc = roc_auc_score(truePCRs_masked, predPCRs_masked)
+                trPrauc = average_precision_score(truePCRs_masked, predPCRs_masked)
+
             print()
             if self.writer:
-                self.writer.add_scalars('Seg Loss/Training', {"Overall": Mean(segLossesThisEpoch), 
-                                                              "Boundary": Mean(bdLossesThisEpoch),
-                                                              "BCE": Mean(bceLossesThisEpoch),
-                                                              "Tversky": Mean(tvLossesThisEpoch)}, self.currentEpoch)
-                
+                if len(segLossesThisEpoch) > 0:
+                    self.writer.add_scalars('Seg Loss/Training', {"Overall": Mean(segLossesThisEpoch), 
+                                                                  "Boundary": Mean(bdLossesThisEpoch),
+                                                                  "BCE": Mean(bceLossesThisEpoch),
+                                                                  "Tversky": Mean(tvLossesThisEpoch)}, self.currentEpoch)
                 if len(pcrLossesThisEpoch) > 0:
-                    self.writer.add_scalar('PCR Loss/Training', Mean(pcrLossesThisEpoch), self.currentEpoch)
-                    self.writer.add_scalar('Joint Loss/Training', Mean([s + p for s, p in zip(segLossesThisEpoch, pcrLossesThisEpoch)]), self.currentEpoch)
-
+                    self.writer.add_scalars(f"PCR Loss/Training", {"Overall": Mean(pcrLossesThisEpoch),
+                                                                   "RFP": Mean(rfpLossesThisEpoch),
+                                                                   "BCE": Mean(bceLossesThisEpoch)}, self.currentEpoch)
                 if self.currentEpoch % 10 == 0 and self.logGradients:
                     for name, param in self.model.named_parameters():
-                        if param.grad is not None and ('encoder' in name or 'bottleneck' in name or 'decoder' in name):
+                        if param.grad is not None and any(k in name for k in ["encoder", "bottleneck", "decoder", "classifier", "patientData"]):
                             self.writer.add_histogram(f'Training Gradients/{name}', param.grad, self.currentEpoch)
 
             print(f"\tTraining loop took {FormatSeconds(time() - startEpoch)}")
@@ -292,6 +296,7 @@ class MyTrainer():
             bdLossesVal = []
             tvLossesVal = []
             pcrLossesVal = []
+            rfpLossesVal = []
             diceValFull = []
             diceValPatches = []
             sensVal = []
@@ -303,7 +308,7 @@ class MyTrainer():
             nBatches = len(self.vlDataloader)
             for idx, struct in enumerate(self.vlDataloader):        # iterate over patient cases
                 mris, dmap, seg, pcr, bbox, patientIDs = zip(*struct)
-                truePCRs += [t.item() for t in pcr]
+                truePCRs.append(pcr)
                 phases, distMap, target, patchIndices = GetPatches(mris, dmap, seg, PATCH_SIZE * self.downsamplePatch, 
                                                                    NUM_PATCHES, 0, 0, bbox, self.downsampleImg, True)
                 phases: torch.Tensor    = phases.transpose(1, 2).to(self.device, non_blocking=True)
@@ -316,82 +321,80 @@ class MyTrainer():
                 with torch.no_grad(), torch.autocast(self.device.type):
                     n = patchIndices.shape[1]
                     allOuts = []
-                    allPCRs = []
                     for startI in range(0, n, CHUNK_SIZE):
                         stopI = min(startI + CHUNK_SIZE, n)
-                        segOut, _, pcrOut = self.model(phases[:, :, startI:stopI], patientIDs, patchIndices[:, startI:stopI])
-                        pcrLoss = None
+                        out = self.model(phases[:, :, startI:stopI], patientIDs, patchIndices[:, startI:stopI], DownsampleTensor(target, PATCH_SIZE)[:, startI:stopI])
+                        allOuts.append(out)    
+                        del out
 
-                        allOuts.append(segOut)
-                        if self.currentEpoch >= self.pretrainSegmentation and pcrOut is not None and self.joint:
-                            pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
-                            if self.pcrConfidence:
-                                allPCRs.append((torch.sigmoid(pcrOut[0] * torch.sigmoid(pcrOut[1]))).squeeze(dim=-1))
-                            else:
-                                allPCRs.append(pcrOut.squeeze(dim=-1))
-                            
-                        del segOut
-                
-                    segOut = torch.cat(allOuts, dim=1)
-                    segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
-                    segLoss = self.SegLoss(segOut.float(), target, distMap)
+                    if self.mode == MODE_PCR:
+                        outs, rfpLosses = zip(*allOuts)
+                        pcrOut = torch.cat(outs, dim=1)
+                        pcrLoss = self.PCRloss(pcrOut.squeeze(-1), pcr)
+                        if torch.isnan(pcrLoss):
+                            print("PCR Loss is NAN, pcrOut:", pcrOut)
+                            import pdb
+                            pdb.set_trace()
+                        rfpLoss = torch.stack(rfpLosses).mean()
+                        loss: torch.Tensor = pcrLoss + rfpLoss
+                        predPCRs.append(pcrOut.mean())
+                        
+                        pcrLossesVal.append(loss.item())
+                        bceLossesVal.append(pcrLoss.item())
+                        rfpLossesVal.append(rfpLoss.item())
 
-                    bceLoss = self.SegLoss.bc * self.SegLoss.BCWeight
-                    bdLoss = self.SegLoss.bd * self.SegLoss.BDWeight
-                    tvLoss = self.SegLoss.tv * self.SegLoss.TVWeight
+                        print(f"\tValidation Batch {idx+1}/{nBatches}: {loss:.4f} = PCR Loss {pcrLoss:.4f} + RFP Loss {rfpLoss:.4f}", end='\r')
+                    else:
+                        segOut = torch.cat(allOuts, dim=1)
+                        segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
+                        loss = self.SegLoss(segOut.float(), target, distMap)
 
-                    if self.joint:
-                        predPCRs.append(Mean(allPCRs))
+                        bceLoss = self.SegLoss.bc * self.SegLoss.BCWeight
+                        bdLoss = self.SegLoss.bd * self.SegLoss.BDWeight
+                        tvLoss = self.SegLoss.tv * self.SegLoss.TVWeight
 
-                patchIndices = patchIndices.cpu()
+                        segLossesVal.append(loss.item())
+                        bceLossesVal.append(bceLoss.item())
+                        tvLossesVal.append(tvLoss.item())
+                        bdLossesVal.append(bdLoss.item())
 
-                # print(f"\tValidation Batch {idx+1}/{nBatches}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + BD Loss: {bdLoss:.4f}{f" + PCR Loss {pcrLoss:.4f}" if pcrLoss is not None else ""}", end='\r')
-                print(f"\tValidation Batch {idx+1}/{nBatches}: {segLoss:.4f} = BCE Loss: {bceLoss:.4f} + Tversky Loss: {tvLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
+                        print(f"\tValidation Batch {idx+1}/{nBatches}: {loss:.4f} = BCE Loss: {bceLoss:.4f} + Tversky Loss: {tvLoss:.4f} + BD Loss: {bdLoss:.4f}", end='\r')
 
                 del phases, distMap
-                
-                segLossesVal.append(segLoss.item())
-                bceLossesVal.append(bceLoss.item())
-                tvLossesVal.append(tvLoss.item())
-                bdLossesVal.append(bdLoss.item())
-                
-                segOut: torch.Tensor = (segOut > 0).int().cpu()
-                target = target.int().cpu()
-                dicePatches = []
-                diceFull = []
-                sens = []
-                spec = []
-                for i in range(len(patientIDs)):
-                    dicePatches.append(Dice(segOut[i], target[i]))
 
-                    segImageArr     = ReconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE * self.downsamplePatch)
-                    targetImageArr  = ReconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE * self.downsamplePatch)
-                    
-                    diceFull.append(Dice(segImageArr, targetImageArr))
-                    tp, fp, tn, fn = tp_fp_tn_fn(segImageArr, targetImageArr)
-                    sens.append(tp / (tp + fn))
-                    spec.append(tn / (tn + fp))
+                if self.mode == MODE_SEG:
+                    patchIndices = patchIndices.cpu()
+                    segOut: torch.Tensor = (segOut > 0).int().cpu()
+                    target = target.int().cpu()
+                    dicePatches = []
+                    diceFull = []
+                    sens = []
+                    spec = []
+                    for i in range(len(patientIDs)):
+                        dicePatches.append(Dice(segOut[i], target[i]))
 
-                diceValFull.append(Mean(diceFull))
-                diceValPatches.append(Mean(dicePatches))
-                sensVal.append(Mean(sens))
-                specVal.append(Mean(spec))
+                        segImageArr     = ReconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE * self.downsamplePatch)
+                        targetImageArr  = ReconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE * self.downsamplePatch)
+                        
+                        diceFull.append(Dice(segImageArr, targetImageArr))
+                        tp, fp, tn, fn = tp_fp_tn_fn(segImageArr, targetImageArr)
+                        sens.append(tp / (tp + fn))
+                        spec.append(tn / (tn + fp))
 
-                if self.joint and pcrLoss is not None and not pcrLoss.isnan().any():
-                    pcrLossesVal.append(pcrLoss.item())
+                    diceValFull.append(Mean(diceFull))
+                    diceValPatches.append(Mean(dicePatches))
+                    sensVal.append(Mean(sens))
+                    specVal.append(Mean(spec))
 
-                del segOut, pcrOut, target, patchIndices, segLoss, pcrLoss, mris, dmap, seg, pcr
+                del target, patchIndices, loss, mris, dmap, seg, pcr
             torch.cuda.empty_cache()
 
             self.LRScheduler.step()
             print()
 
-            auc = None
-            if self.joint and self.currentEpoch >= self.pretrainSegmentation:
-                predPCRs = torch.cat(predPCRs).tolist()
-                # Convert to numpy arrays (if they aren’t already)
-                truePCRs = np.array(truePCRs)
-                predPCRs = np.array(predPCRs)
+            if self.mode == MODE_PCR:
+                predPCRs = torch.stack(predPCRs).float().cpu().numpy()
+                truePCRs = np.array(truePCRs).astype(int).squeeze()
 
                 # Mask out invalid entries
                 mask = truePCRs != -1
@@ -399,7 +402,13 @@ class MyTrainer():
                 predPCRs_masked = predPCRs[mask]
 
                 # Now compute AUC only on valid entries
-                auc = roc_auc_score(truePCRs_masked, predPCRs_masked)
+                fpr, sens, _ = roc_curve(truePCRs_masked, predPCRs_masked)
+                spec = 1 - fpr
+                i = np.argmax(spec + sens - 1)
+                vlSens = sens[i]
+                vlSpec = spec[i]
+                vlAuc = roc_auc_score(truePCRs_masked, predPCRs_masked)
+                vlPrauc = average_precision_score(truePCRs_masked, predPCRs_masked)
 
             # MODEL CHECKPOINTING
             if self.writer:
@@ -418,9 +427,6 @@ class MyTrainer():
                 self.writer.add_scalars('Val Metrics', {"Sensitivity": Mean(sensVal),
                                                         "Specificity": Mean(specVal)}, self.currentEpoch)
 
-                if auc:
-                    self.writer.add_scalar("PCR AUC", auc, self.currentEpoch)
-
                 if avgDiceVal > bestSeg:
                     bestSeg = avgDiceVal
                     bestSegEpoch = self.currentEpoch
@@ -429,29 +435,23 @@ class MyTrainer():
                 
                 if len(pcrLossesVal) > 0:
                     avgPCRValLoss = Mean(pcrLossesVal)
-                    self.writer.add_scalar('PCR Loss/Validation', avgPCRValLoss, self.currentEpoch)
-
-                    avgJoint = Mean([s + p for s, p in zip(segLossesVal, pcrLossesVal)])
-                    self.writer.add_scalar('Joint Loss/Validation', avgJoint, self.currentEpoch)
+                    self.writer.add_scalars("PCR Loss/Validation", {"Overall": avgPCRValLoss,
+                                                                     "RFP": Mean(rfpLossesVal),
+                                                                     "BCE": Mean(bceLossesVal)}, self.currentEpoch)
+                    self.writer.add_scalars("PCR AUC", {"Train": trAuc, "Val": vlAuc}, self.currentEpoch)
+                    self.writer.add_scalars("PCR PR AUC", {"Train": trPrauc, "Val": vlPrauc}, self.currentEpoch)
+                    self.writer.add_scalars("Sensitivity", {"Train": trSens, "Val": vlSens}, self.currentEpoch)
+                    self.writer.add_scalars("Specificity", {"Train": trSpec, "Val": vlSpec}, self.currentEpoch)
 
                     if avgPCRValLoss < bestPCR:
                         bestPCR = avgPCRValLoss
                         print(f"Saving Best PCR: epoch {self.currentEpoch}")
                         self.saveModel(f"BestPCR{self.tag}")
-                    
-                    if avgJoint < bestJoint:
-                        bestJoint = avgJoint
-                        bestJointEpoch = self.currentEpoch
-                        print(f"Saving Best Joint: epoch {self.currentEpoch}")
-                        self.saveModel(f"BestJoint{self.tag}")
 
-            if self.currentEpoch % 5 == 0 or (self.joint and self.currentEpoch == self.pretrainSegmentation - 1):
+            if self.currentEpoch % 5 == 0:
                 self.saveModel()
 
-            if self.joint and self.currentEpoch >= self.pretrainSegmentation and self.currentEpoch - bestJointEpoch >= self.stopAfterPlateauEpochs:
-                print(f"Haven't seen joint task improvement in {self.stopAfterPlateauEpochs} epochs. Stopping early.")
-                break
-            elif not self.joint and self.currentEpoch - bestSegEpoch >= self.stopAfterPlateauEpochs:
+            elif self.currentEpoch - bestSegEpoch >= self.stopAfterPlateauEpochs:
                 print(f"Haven't seen segmentation improvement in {self.stopAfterPlateauEpochs} epochs. Stopping early.")
                 break
 
@@ -482,8 +482,6 @@ class MyTrainer():
         print(f"Loading {os.path.basename(stateDictPath)} from epoch {epoch}")
         self.model.load_state_dict(modelState)
         self.model.eval()
-        if not self.joint:
-            self.model.ret = "segOnly"
 
         resultsFolder = f"outputs{self.tag}{resultsTag}"
         outputPath = os.path.join(self.outputFolder, resultsFolder, outputPath)
@@ -496,91 +494,114 @@ class MyTrainer():
         
         print("Running inference!")
         scoreDF = None
+
+        truePCRs = []
+        predPCRs = []
+        
         for struct in self.tsDataloader:
             mris, dmap, seg, pcr, bbox, patientIDs = zip(*struct)
             phases, _, target, patchIndices = GetPatches(mris, dmap, seg, PATCH_SIZE * self.downsamplePatch, 
-                                                                   NUM_PATCHES, 0, 0, bbox, self.downsampleImg, True)
+                                                         NUM_PATCHES, 0, 0, bbox, self.downsampleImg, True)
             phases: torch.Tensor    = phases.transpose(1, 2).to(self.device, non_blocking=True)
             phase1: torch.Tensor    = phases[:, 1].float().cpu()
             patchIndices            = patchIndices.to(self.device, non_blocking=True)
+            target: torch.Tensor    = target.to(self.device, non_blocking=True)
 
             phases = DownsampleTensor(phases, PATCH_SIZE)
-
+            truePCRs.append(pcr)
+            predsThisBatch = []
             with torch.no_grad(), torch.autocast(self.device.type):
                 n = patchIndices.shape[1]
                 allOuts = []
-                allPCRs = []
                 for startI in range(0, n, CHUNK_SIZE):
                     stopI = min(startI + CHUNK_SIZE, n)
-                    x: torch.Tensor = self.model(phases[:, :, startI:stopI], patientIDs, patchIndices[:, startI:stopI])
-                    if self.joint:
-                        segOut, _, pcrOut = x
-                        if self.pcrConfidence:
-                            allPCRs.append((torch.sigmoid(pcrOut[0] * torch.sigmoid(pcrOut[1]))).squeeze(dim=-1))
-                        else:
-                            allPCRs.append(pcrOut.squeeze(dim=-1))
-                    else:
-                        allOuts.append(x)
-            
-            segOut = torch.cat(allOuts, dim=1)
-            segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
-            segOut: torch.Tensor = (segOut > 0).int().cpu()
-            
-            if self.joint:
-                pcrOut = torch.cat(allPCRs, dim=-1)
-                pcrOut = pcrOut.mean(dim=-1)
+                    out = self.model(phases[:, :, startI:stopI], patientIDs, patchIndices[:, startI:stopI], DownsampleTensor(target.float(), PATCH_SIZE)[:, startI:stopI])
+                    allOuts.append(out)    
+                    del out
 
-            patchIndices = patchIndices.detach().cpu()
-            for i, patientID in enumerate(patientIDs):
-                dicePatches = Dice(segOut[i], target[i])
-                phaseImageArr   = ReconstructImageFromPatches(phase1[i], patchIndices[i], PATCH_SIZE * self.downsamplePatch)
-                segImageArr     = ReconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE * self.downsamplePatch)
-                targetImageArr  = ReconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE * self.downsamplePatch)
-                
-                dice = Dice(segImageArr, targetImageArr)
-                segMetrics = GetMetrics(*tp_fp_tn_fn(segImageArr, targetImageArr), "Seg")
+                if self.mode == MODE_PCR:
+                    outs, _ = zip(*allOuts)
+                    pcrOut = torch.cat(outs, dim=1)
+                    predPCRs.append(pcrOut.float().mean().item())
+                    predsThisBatch.append(pcrOut.float().mean().item())
 
-                segImageArr = segImageArr.numpy()
-                targetImageArr = targetImageArr.numpy()
-
-                hausdorff = min(hausdorff_distance(targetImageArr, segImageArr), 1000)
-
-                row = {"Patient ID": [patientID], "Dice (Full Image)": [dice], "Dice (Avg Over Patches)": [dicePatches],"HD95": [hausdorff]} | segMetrics
-                if self.joint:
-                    row = row | {"PCR Pred": pcrOut[i].item(), "PCR True": pcr[i].item()}
-                
-                row = pd.DataFrame(row)
-                if scoreDF is not None:
-                    scoreDF = pd.concat([scoreDF, row])
                 else:
-                    scoreDF = row
+                    segOut = torch.cat(allOuts, dim=1)
+                    segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
 
-                sitk.WriteImage(sitk.GetImageFromArray(segImageArr), 
-                                os.path.join(outputPath, f"{patientID}_pred.nii"))
-                sitk.WriteImage(sitk.GetImageFromArray(targetImageArr), 
-                                os.path.join(outputPath, f"{patientID}.nii"))
-                sitk.WriteImage(sitk.GetImageFromArray(phaseImageArr.numpy()),
-                                os.path.join(outputPath, f"{patientID}_phase.nii"))
-                
-                print(" " * 80, end="\r")
-                print(f"Finished patient {patientID}\tDice: {dice:.4f}\tHausdorff 95: {hausdorff:.4f}", end="\r")
+            del phases
+            
+            if self.mode == MODE_PCR:
+                for i, patientID in enumerate(patientIDs):
+                    row = {"Patient ID": [patientID], "PCR": [pcr[i].item()], "Pred PCR": [predsThisBatch[i]]}
+                        
+                    row = pd.DataFrame(row)
+                    if scoreDF is not None:
+                        scoreDF = pd.concat([scoreDF, row])
+                    else:
+                        scoreDF = row
+
+                    print(" " * 80, end="\r")
+                    print(f"Finished patient {patientID}\tPCR: {pcr[i].item()}\tPred: {predsThisBatch[i]:.4f}", end="\r")
+
+            if self.mode == MODE_SEG:
+                patchIndices = patchIndices.detach().cpu()
+                for i, patientID in enumerate(patientIDs):
+                    dicePatches = Dice(segOut[i], target[i])
+                    phaseImageArr   = ReconstructImageFromPatches(phase1[i], patchIndices[i], PATCH_SIZE * self.downsamplePatch)
+                    segImageArr     = ReconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE * self.downsamplePatch)
+                    targetImageArr  = ReconstructImageFromPatches(target[i], patchIndices[i], PATCH_SIZE * self.downsamplePatch)
+                    
+                    dice = Dice(segImageArr, targetImageArr)
+                    segMetrics = GetMetrics(*tp_fp_tn_fn(segImageArr, targetImageArr), "Seg")
+
+                    segImageArr = segImageArr.numpy()
+                    targetImageArr = targetImageArr.numpy()
+
+                    hausdorff = min(hausdorff_distance(targetImageArr, segImageArr), 1000)
+
+                    row = {"Patient ID": [patientID], "Dice (Full Image)": [dice], "Dice (Avg Over Patches)": [dicePatches],"HD95": [hausdorff]} | segMetrics
+                    
+                    row = pd.DataFrame(row)
+                    if scoreDF is not None:
+                        scoreDF = pd.concat([scoreDF, row])
+                    else:
+                        scoreDF = row
+
+                    sitk.WriteImage(sitk.GetImageFromArray(segImageArr), 
+                                    os.path.join(outputPath, f"{patientID}_pred.nii"))
+                    sitk.WriteImage(sitk.GetImageFromArray(targetImageArr), 
+                                    os.path.join(outputPath, f"{patientID}.nii"))
+                    sitk.WriteImage(sitk.GetImageFromArray(phaseImageArr.numpy()),
+                                    os.path.join(outputPath, f"{patientID}_phase.nii"))
+                    
+                    print(" " * 80, end="\r")
+                    print(f"Finished patient {patientID}\tDice: {dice:.4f}\tHausdorff 95: {hausdorff:.4f}", end="\r")
         print()
-        if self.joint:
-            truePCRs = np.array(scoreDF["PCR True"])
-            predPCRs = np.array(scoreDF["PCR Pred"])
+        auc = None
+        if self.mode == MODE_PCR:
+            predPCRs = np.array(predPCRs)
+            truePCRs = np.array(truePCRs).astype(int).squeeze()
 
             # Mask out invalid entries
             mask = truePCRs != -1
             truePCRs_masked = truePCRs[mask]
             predPCRs_masked = predPCRs[mask]
-            auc = roc_auc_score(truePCRs_masked, predPCRs_masked)
-            scoreDF["AUC"] = auc
 
+            # Now compute AUC only on valid entries
+            auc = roc_auc_score(truePCRs_masked, predPCRs_masked)
+            prauc = average_precision_score(truePCRs_masked, predPCRs_masked)
+            print("===================")
+            print("TESTING AUC:", auc)
+            print("TESTING PRAUC:", prauc)
+            print("===================")
+            scoreDF["ROC AUC"] = auc
+            scoreDF["PR AUC"] = prauc
         savePath = os.path.join(self.outputFolder, resultsFolder, "scores.csv")
         scoreDF.to_csv(savePath, index=False)
 
         print(f"Saved results to: {savePath}")
-        metrics = [col for col in scoreDF.columns if col != "Patient ID"]
+        metrics = [col for col in scoreDF.columns if col != "Patient ID" and "PCR" not in col]
         for metric in metrics:
             meanVal = scoreDF[metric].mean()
             stdVal = scoreDF[metric].std()
@@ -660,19 +681,19 @@ if __name__ == "__main__":
     pretrainedDecoderPath = None
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    cat = 120
+    cat = None
     pool = True
-    tag = f"Jan08-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}1024Encoder5Patches32Heads"
-    # tag = "Oct24-DownsampleImagesWithPCR"
+    # tag = f"Jan13-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}5Patches32Heads"
+    tag = "Jan16-RFPFixMaskHopefully"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS
     # bottleneck = BOTTLENECK_TRANSFORMERST
     # bottleneck = BOTTLENECK_CONV
-    skips = True
-    joint = False
+    skips = False
+    mode = MODE_PCR
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
-    modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=400, modelName=modelName, tag=tag, joint=joint, cat=cat, pool=pool, useJD=False, test=test)
+    modelName = f"{bottleneck}{"PCR" if mode == MODE_PCR else "Seg"}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
+    trainer = MyTrainer(nEpochs=400, modelName=modelName, tag=tag, mode=mode, cat=cat, pool=pool, test=test)
     
     trainer.setup(dataDir, 
                   device, 
@@ -683,8 +704,8 @@ if __name__ == "__main__":
 
     # trainer.train(continueTraining=True, modelName=f"Latest{tag}.pth")
     trainer.train()
-    # trainer.inference(f"Latest{tag}.pth", "Latest")
-    if joint:
+    trainer.inference(f"Latest{tag}.pth", "Latest")
+    if mode == MODE_PCR:
         trainer.inference(f"BestPCR{tag}.pth", "BestPCR")
     else:
         trainer.inference(f"BestSeg{tag}.pth", "BestSeg")
