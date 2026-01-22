@@ -13,6 +13,9 @@ class PCRLoss(nn.Module):
 
         # ignore missing pcr values
         mask = targets != -1
+        
+        if mask.sum().item() == 0:
+            return None
 
         # Ensure logits and targets match in shape
         if logits.ndim == 2 and logits.shape[1] == 1:

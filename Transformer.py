@@ -233,15 +233,12 @@ class MySpatioTemporalTransformer(nn.Module):
                  channels: list[int],
                  nHeads: int,
                  nLayers: int,
-                 patientDataPath: str,
                  useAttentionPooling: bool):
         super().__init__()
 
         self.patchSize = patchSize
         self.embDim = channels[-1]
 
-        self.patientDataMod = PatientDataEncoding(nHeads, patientDataPath)
-        # self.nPatientDataOutFeatures = self.patientDataMod.nPatientDataOutFeatures
         self.useAttentionPooling = useAttentionPooling
 
         expectedXYZ = patchSize
@@ -270,37 +267,34 @@ class MySpatioTemporalTransformer(nn.Module):
 
         self.transformer.apply(init_weights_transformer)
     
-    def forward(self, x: torch.Tensor, shape: list[int], patientIDs: list[str], patchIndices: torch.Tensor):
+    def forward(self, x: torch.Tensor, shape: list[int], patchIndices: torch.Tensor, acqTimes: torch.Tensor, pool: bool = True):
         B, T, N, E, X, Y, Z = shape
-        _, acqTimes = self.patientDataMod(shape, patientIDs, x.device)
-        # patientDataEmb: torch.Tensor = patientDataEmb.permute(0, 2, 1, 3).reshape(B, -1, self.nPatientDataOutFeatures)      # [B, T*N*X*Y*Z, npatientDataOutFeatures]
-        acqTimes: torch.Tensor       = acqTimes.transpose(1, 2).reshape(B, -1)                                              # [B, T*N*X*Y*Z]
+        acqTimes: torch.Tensor = acqTimes.transpose(1, 2).reshape(B, -1)                                                    # [B, T*N*X*Y*Z]
 
         x = x.permute(0, 1, 2, 4, 5, 6, 3)          # [B, T, N, E, X, Y, Z] -> [B, T, N, X, Y, Z, E]; put T, N, X, Y, Z next to each other so they can be squished
         x = x.reshape(B, -1, E)                     # [B, T*N*X*Y*Z, E]
         # x = torch.cat((x, patientDataEmb), dim=-1)  # [B, T*N*X*Y*Z, E + npatientDataOutFeatures]
 
-        if not self.useAttentionPooling:
+        if not self.useAttentionPooling and pool:
             # prepend CLS token for classification prediction
-            tok = self.clsToken.expand(B, -1, -1)           # [B, 1, E + npatientDataOutFeatures]
-            x = torch.cat((tok, x), dim=1)                  # [B, 1 + T*N*X*Y*Z, E + npatientDataOutFeatures].
+            tok = self.clsToken.expand(B, -1, -1)           # [B, 1, E]
+            x = torch.cat((tok, x), dim=1)                  # [B, 1 + T*N*X*Y*Z, E].
 
         timeSpaceIndices = torch.cat([acqTimes.unsqueeze(-1), patchIndices.repeat(1, T, 1)], dim=-1)
-        posEnc: torch.Tensor = PositionEncoding4D(timeSpaceIndices, dim = E)
+        posEnc: torch.Tensor = PositionEncoding4D(timeSpaceIndices, dim = E, normalize01=True)
 
         x[:, -T*N*X*Y*Z:] = x[:, -T*N*X*Y*Z:] + posEnc
-        x = self.transformer(x)                     # [B, T*N*X*Y*Z (+1?), E + npatientDataOutFeatures]
+        x = self.transformer(x)                     # [B, T*N*X*Y*Z (+1?), E]
         
-        if self.useAttentionPooling:
-            x = self.poolTokens(x)            # [B, E + npatientDataOutFeatures]
-        else:
-            x = x[:, 0]                         # [B, E + npatientDataOutFeatures]
-        
-        # print(f"Shape after attention pooling: {x.shape}")
-       
-        # x = self.fcToPatches(x)  # [B, E]
-
-        return x
+        if self.useAttentionPooling and pool:
+            x = self.poolTokens(x)              # [B, E]
+        elif pool:
+            x = x[:, 0]                         # [B, E]
+        elif T > 1:
+            # pool just the phases
+            x = self.poolTokens(x.view(B*N, T, E))
+            x = x.view(B, N, E).contiguous()
+        return x                                # [B, N, E]
 
 class Transformer(nn.Module):
     def __init__(self,
@@ -342,32 +336,27 @@ class TransformerLayer(nn.Module):
 
     # Generic transformer layer that does attention and FFN on sequence S
     def forward(self, x: torch.Tensor):
-        B, S, _ = x.shape
-        
-        qkv: torch.Tensor = self.W_qkv(x)
-        qkv = qkv.reshape(B, S, 3, self.n_heads, self.d)            # [B, S, 3, H, d]
-        qkv = qkv.permute(2, 0, 1, 3, 4)                            # [3, B, H, S, d]
-        Q, K, V = qkv[0], qkv[1], qkv[2]                            # Each: [B, H, S, d]
+        B, S, E = x.shape
 
-        # Compute attention
-        scores = (Q @ K.transpose(-2, -1)) / (self.d ** 0.5)        # (B, h, S, S)
-        attn = torch.softmax(scores, dim=-1)                        # (B, h, S, S)
-        context = attn @ V                                          # (B, h, S, d)
+        qkv: torch.Tensor = self.W_qkv(x)           # [B, S, 3 * E]
+        qkv = qkv.view(B, S, 3, self.n_heads, self.d).permute(2, 0, 3, 1, 4).contiguous()
+        Q, K, V = qkv[0], qkv[1], qkv[2]
 
-        # Concatenate heads
-        context = context.permute(0, 2, 1, 3).contiguous()
-        context = context.view(B, S, -1)
+        context = nn.functional.scaled_dot_product_attention(
+            Q, K, V, 
+            dropout_p=self.dropout.p,
+        )
 
-        O: torch.Tensor = self.W_o(context)
-        x = x + O
+        # reshape back: [B, H, S, d] -> [B, S, E]
+        context = context.transpose(1, 2).reshape(B, S, E)
+
+        x = x + self.W_o(context)
         x = self.norm1(x)
         x = self.dropout1(x)
 
         # FFN
-        ffn_out = self.linear2(self.dropout(self.activation(self.linear1(x))))    # Linear -> ReLU -> Dropout -> Linear
-        ffn_out = self.dropout2(ffn_out)
-
-        x = x + ffn_out
+        ffn_out = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        x = x + self.dropout2(ffn_out)
         x = self.norm2(x)
 
         return x
