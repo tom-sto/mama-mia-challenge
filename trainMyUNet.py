@@ -32,12 +32,12 @@ class MyTrainer():
         # self.pretrainSegmentation = self.nEpochs * (1/self.cycles + self.warmup)        # pretrain for first LR annealing cycle
         self.pretrainSegmentation = 0
         self.pcrConfidence = False
-        self.peakLR = 1e-5
-        self.minLR = 1e-6
+        self.peakLR = 5e-5
+        self.minLR = 1e-7
         self.currentEpoch = 0
         self.oversampleFG = 0.5
         self.oversampleRadius = 0.15
-        self.batchSize = 16
+        self.batchSize = 10
         self.clipGrad = False
         self.downsamplePatch = 2
         self.downsampleImg = 2
@@ -93,7 +93,24 @@ class MyTrainer():
                                                                                  batchSize=self.batchSize, shuffle=True, test=self.test)
         print(f"\tTook {FormatSeconds(time() - dataTime)}")
 
-        self.optimizer = torch.optim.AdamW(params=self.model.parameters(), lr=self.minLR)
+        paramGroups = [
+            {'params': self.model.encoder.parameters(), 
+             'lr': self.peakLR
+            },
+            {'params': self.model.bottleneck.parameters(), 
+             'lr': 5e-6
+            },
+            {'params': self.model.decoder.parameters(), 
+             'lr': self.peakLR
+            },
+            {'params': self.model.classifier.parameters(), 
+             'lr': self.peakLR * 2
+            },
+            {'params': self.model.patientDataMod.parameters(), 
+             'lr': self.peakLR * 0.5
+            }
+        ]
+        self.optimizer = torch.optim.AdamW(paramGroups)
         self.gradScaler = torch.GradScaler(device.type)
         self.aggregator = UPGrad()
 
@@ -198,12 +215,11 @@ class MyTrainer():
                             pcrLoss: torch.Tensor = self.PCRloss(pcrOut, pcr)
                             loss = pcrLoss + rfpLoss if pcrLoss is not None else rfpLoss
                             truePCRs.append(torch.stack(pcr))
-                            predPCRs.append(pcrOut.squeeze())
+                            predPCRs.append(pcrOut)
 
                             if pcrLoss is not None:
                                 bcePCRLossesThisEpoch.append(pcrLoss.item())
-                            else:
-                                pcrLoss = 0
+
                             pcrLossesThisEpoch.append(loss.item())
                             rfpLossesThisEpoch.append(rfpLoss.item())
 
@@ -272,7 +288,7 @@ class MyTrainer():
             torch.cuda.empty_cache()
 
             if self.joint:
-                predPCRs = torch.cat(predPCRs).detach().float().cpu().numpy()
+                predPCRs = torch.cat(predPCRs).detach().squeeze().float().cpu().numpy()
                 truePCRs = torch.cat(truePCRs).int().cpu().numpy()
 
                 # Mask out invalid entries
@@ -350,16 +366,15 @@ class MyTrainer():
 
                     segOuts, _, pcrOuts, rfpLosses = zip(*allOuts)
                     if self.joint:
-                        pcrOut = torch.cat(pcrOuts, dim=1)
-                        pcrLoss = self.PCRloss(pcrOut.squeeze(-1), pcr)
+                        pcrOut = torch.cat(pcrOuts, dim=1).mean()
+                        pcrLoss = self.PCRloss(pcrOut.unsqueeze(-1), pcr)
                         rfpLoss = torch.stack(rfpLosses).mean()
                         loss: torch.Tensor = pcrLoss + rfpLoss if pcrLoss is not None else rfpLoss
                         predPCRs.append(pcrOut.mean())
 
                         if pcrLoss is not None:
                             bcePCRLossesVal.append(pcrLoss.item())
-                        else:
-                            pcrLoss = 0
+
                         pcrLossesVal.append(loss.item())
                         rfpLossesVal.append(rfpLoss.item())
 
@@ -407,9 +422,6 @@ class MyTrainer():
                 sensVal.append(Mean(sens))
                 specVal.append(Mean(spec))
 
-                if self.joint and pcrLoss is not None and not pcrLoss.isnan().any():
-                    pcrLossesVal.append(pcrLoss.item())
-
                 del segOut, pcrOut, target, patchIndices, segLoss, pcrLoss, mris, dmap, seg, pcr
             torch.cuda.empty_cache()
             
@@ -451,12 +463,11 @@ class MyTrainer():
                 self.writer.add_scalars('Val Metrics', {"Sensitivity": Mean(sensVal),
                                                         "Specificity": Mean(specVal)}, self.currentEpoch)
 
-
-                if avgDiceVal > bestSeg:
-                    bestSeg = avgDiceVal
-                    bestSegEpoch = self.currentEpoch
-                    print(f"Saving Best Seg: epoch {self.currentEpoch}")
-                    self.saveModel(f"BestSeg{self.tag}")
+                # if avgDiceVal > bestSeg:
+                #     bestSeg = avgDiceVal
+                #     bestSegEpoch = self.currentEpoch
+                #     print(f"Saving Best Seg: epoch {self.currentEpoch}")
+                #     self.saveModel(f"BestSeg{self.tag}")
                 
                 if len(pcrLossesVal) > 0:
                     avgPCRValLoss = Mean(pcrLossesVal)
@@ -467,11 +478,6 @@ class MyTrainer():
                     self.writer.add_scalars("PCR PR AUC", {"Train": trPrauc, "Val": vlPrauc}, self.currentEpoch)
                     self.writer.add_scalars("Sensitivity", {"Train": trSens, "Val": vlSens}, self.currentEpoch)
                     self.writer.add_scalars("Specificity", {"Train": trSpec, "Val": vlSpec}, self.currentEpoch)
-
-                    if avgPCRValLoss < bestPCR:
-                        bestPCR = avgPCRValLoss
-                        print(f"Saving Best PCR: epoch {self.currentEpoch}")
-                        self.saveModel(f"BestPCR{self.tag}")
 
                     avgJoint = Mean([s + p for s, p in zip(segLossesVal, pcrLossesVal)])
                     self.writer.add_scalar('Joint Loss/Validation', avgJoint, self.currentEpoch)
@@ -695,7 +701,7 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     cat = 128
     pool = True
-    tag = f"Jan21-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}ThisIsMyLastHopeForMICCAI-NoJD"
+    tag = f"Jan26-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}MoreClassifierDropoutAndSmallerPatientFeatureEmbedding"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS

@@ -250,7 +250,6 @@ class MySpatioTemporalTransformer(nn.Module):
         layer = TransformerLayer(emb_dim=self.embDim, n_heads=nHeads, dropout=0)
         self.transformer    = Transformer(layer, num_layers=nLayers)
         self.poolTokens     = AttentionPooling(self.embDim, nHeads)
-        # self.fcToPatches    = nn.Linear(self.embDim, self.embDim)
 
         self._initialize_weights()
 
@@ -327,7 +326,7 @@ class TransformerLayer(nn.Module):
         self.linear1    = nn.Linear(emb_dim, dim_feedforward)
         self.dropout    = nn.Dropout(dropout)
         self.linear2    = nn.Linear(dim_feedforward, emb_dim)
-        self.activation = nn.ReLU()
+        self.activation = nn.GELU()
 
         self.norm1      = nn.LayerNorm(emb_dim, eps=layer_norm_eps)
         self.norm2      = nn.LayerNorm(emb_dim, eps=layer_norm_eps)

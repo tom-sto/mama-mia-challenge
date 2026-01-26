@@ -4,9 +4,10 @@ import torch.nn as nn
 class ClassifierHead(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
-        self.intermediateFeatures = 128
+        self.intermediateFeatures = 64
         self.fc = nn.Sequential(
             nn.LayerNorm(dim),
+            nn.Dropout(0.4),
             nn.Linear(dim, self.intermediateFeatures),
             nn.LayerNorm(self.intermediateFeatures),
             nn.ReLU(),

@@ -14,7 +14,7 @@ class RiskFactorPrediction(nn.Module):
             nn.Linear(embDim, self.hiddenDim),
             nn.GroupNorm(num_groups=self.outDim, num_channels=self.hiddenDim),
             nn.ReLU(),
-            # nn.Dropout(),
+            nn.Dropout(),
             nn.Linear(self.hiddenDim, self.outDim)
         )
 
@@ -52,11 +52,12 @@ class PatientDataEncoding(nn.Module):
         self.patientDataDF = pd.read_excel(patientDataPath, sheet_name="dataset_info")
 
         self.inFeatures = 45             # one-hot encoding for most variables, continuous for age
-        self.outFeatures = 64
+        self.outFeatures = 32
         self.patientDataEmbed = nn.Sequential(
             nn.Dropout(0.3),
             nn.Linear(self.inFeatures, self.outFeatures)
         )
+        self.riskFactorPred = RiskFactorPrediction(self.patientDataDF, embDim, self.inFeatures)
 
         self.ageEncode  = lambda x: torch.tensor([(x - self.ageMin) / (self.ageMax - self.ageMin)], dtype=torch.float32) if x is not None \
             else torch.tensor([-1], dtype=torch.float32)   # normalize age to [0, 1] range, default to 0.5 if None
@@ -78,8 +79,6 @@ class PatientDataEncoding(nn.Module):
         nacAgents = ["ABT 888", "AMG 386", "Anthracycline", "Carboplatin", "FEC100", "Ganetespib", "Ganitumab", "MK-2206", 
                      "Neratinib", "Paclitaxel", "Pembrolizumab", "Pertuzumab", "T-DM1", "Taxane", "Trastuzumab"]
         self.nacEncode = lambda x: torch.tensor([a in str(x) for a in nacAgents], dtype=torch.float)
-
-        self.riskFactorPred = RiskFactorPrediction(self.patientDataDF, embDim, self.inFeatures)
 
     def forward(self, x: torch.Tensor, patientIDs: list[str]):
         patientData = CleanPatientData(self.patientDataDF, patientIDs, columns=[
