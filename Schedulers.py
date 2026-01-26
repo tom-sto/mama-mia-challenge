@@ -18,25 +18,24 @@ class WarmupCosineAnnealingWithRestarts(_LRScheduler):
     def get_lr(self):
         step = self.last_epoch
 
-        if step == 0:
-            return [self.minLR for _ in self.base_lrs]
-
-        # Warmup phase
         if step < self.warmup_steps:
-            warmup_lr = self.minLR + (self.maxLR - self.minLR) * step / self.warmup_steps
-            return [warmup_lr for _ in self.base_lrs]
+            scale = step / self.warmup_steps
+            return [max(self.minLR, base_lr * scale) for base_lr in self.base_lrs]
 
-        # Update cycle
+        # 2. Cycle Management
         if step >= self.next_cycle_step:
             self.cur_cycle += 1
+            self.cycle_progress = 0
             self.cycle_steps = int(self.cycle_steps * self.cycle_mult)
             self.next_cycle_step = step + self.cycle_steps
-            self.cycle_progress = 0
         else:
             self.cycle_progress = step - (self.next_cycle_step - self.cycle_steps)
 
+        # 3. Cosine Annealing Phase
         cycle_ratio = self.cycle_progress / self.cycle_steps
-        damped_max_lr = self.maxLR * (self.damping ** self.cur_cycle)
-        cosine_lr = self.minLR + 0.5 * (damped_max_lr - self.minLR) * (1 + math.cos(math.pi * cycle_ratio))
-
-        return [cosine_lr for _ in self.base_lrs]
+        damped_factor = self.damping ** self.cur_cycle
+        
+        # Scale fluctuates between 0 and 1.0, multiplied by damping
+        cosine_scale = 0.5 * (1 + math.cos(math.pi * cycle_ratio)) * damped_factor
+        
+        return [max(self.minLR, base_lr * cosine_scale) for base_lr in self.base_lrs]

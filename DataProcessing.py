@@ -70,33 +70,6 @@ def ExtractPatches(array: list[torch.Tensor], patch_indices: list[list[list[int]
                 
     return patches
 
-# @torch.jit.script
-# def ExtractPatches(array: list[torch.Tensor], patch_indices: list[list[list[int]]], patch_size: int):
-#     n_patches = len(patch_indices[0])
-#     n_arrays  = len(array)      # batch size
-    
-#     if array[0].ndim == 4:
-#         n_phases = len(array[0])
-#         patches = torch.empty((n_arrays, n_patches, n_phases, patch_size, patch_size, patch_size), dtype=array[0].dtype)
-#     elif array[0].ndim == 3:
-#         patches = torch.empty((n_arrays, n_patches, patch_size, patch_size, patch_size), dtype=array[0].dtype)
-#     else:
-#         raise Exception(f"Cannot extract 3D patches from {array[0].ndim}D tensor!")
-    
-#     for i in range(n_arrays):
-#         arr = array[i]
-#         for j in range(n_patches):
-#             idx: list[int] = patch_indices[i][j]
-#             x, y, z = idx
-#             if arr.ndim == 3:
-#                 patches[i, j] = arr[x:x+patch_size, y:y+patch_size, z:z+patch_size]
-#             elif arr.ndim > 3:
-#                 patches[i, j] = arr[..., x:x+patch_size, y:y+patch_size, z:z+patch_size]
-#             else:
-#                 raise Exception(f"Cannot extract 3D patches from {arr.ndim}D tensor!")
-        
-#     return patches
-
 def Downsample(arr: np.ndarray, factor: int):
     if factor <= 0:
         raise ValueError("Downsampling factor must be a positive integer.")
@@ -134,14 +107,16 @@ data {
         num_phases: {
             patient_id:            e.g. ("duke_002", "ispy2_981664")
                 handle (or [handles]) - partial that returns
-                - segImg tensors
+                - segImg tensor
                     [NUM_PATCHES x PATCH_SIZE x PATCH_SIZE x PATCH_SIZE]
-                - dmapImg tensors
+                - dmapImg tensor
                     [NUM_PATCHES x PATCH_SIZE x PATCH_SIZE x PATCH_SIZE]
-                - phaseImg tensors
+                - phaseImg tensor
                     [num_phases x NUM_PATCHES x PATCH_SIZE x PATCH_SIZE x PATCH_SIZE]
-                - pcr tensors
+                - pcr tensor
                     [singleton]
+                - patientInfo tensor
+                    [12]
                 - patchIndices
                     (list of 3-tuples)
         }

@@ -97,6 +97,6 @@ def GetDataloaders(dataDir: str, patientDataPath: str, trAugCompose, vlTsAugComp
         dataset = CustomDataset(data=data[split], augmentCompose=augmentCompose)
         sampler = CustomBatchSampler(data[split], batchSize=1 if split!="training" else batchSize, shuffle=shuffle)
         return torch.utils.data.DataLoader(dataset, batch_sampler=sampler, collate_fn=collate, 
-                                           num_workers=min(batchSize, 12), pin_memory=True, persistent_workers=True)
+                                           num_workers=min(batchSize, 8), pin_memory=True, persistent_workers=True)
 
     return makeLoader("training", trAugCompose), makeLoader("validation", vlTsAugCompose), makeLoader("testing", vlTsAugCompose)

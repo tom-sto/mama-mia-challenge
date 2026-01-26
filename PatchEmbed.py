@@ -40,19 +40,19 @@ class PatchEncoder(nn.Module):
         # T is num_phases
         # C should be 1 since we want this to be our "channels" to become embed_dim
         x = x.reshape(B * T * N, C, D, H, W)
-
-        skips: list[torch.Tensor] = []
+        
         def run_encoder(t: torch.Tensor):
+            skips = []
             for i, block in enumerate(self.mod):
                 t = block(t)
                 if self.useSkips:
-                    unpatched = t.reshape(B, T, N, *t.shape[-4:])[:,1]          # reshape to [B, N, C, X, Y, Z], taking first post-contrast phase from T
+                    unpatched = t.reshape(B, T, N, *t.shape[-4:])[:,min(T-1, 1)]          # reshape to [B, N, C, X, Y, Z], taking first post-contrast phase from T
                     unpatched = unpatched.reshape(-1, *unpatched.shape[2:])     # merge the batch and patch dimensions to [B*N, C, X, Y, Z]
                     skips.append(unpatched)
-            return t
+            return t, skips
         
         # Use checkpointing on the encoder
-        x = checkpoint(run_encoder, x, use_reentrant=False)
+        x, skips = checkpoint(run_encoder, x, use_reentrant=False)
 
         _, E, X, Y, Z = x.shape
         assert X == Y == Z == 1, f"Expected spatial dims to reduce to 1, got {X} x {Y} x {Z}"
