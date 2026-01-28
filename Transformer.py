@@ -272,7 +272,6 @@ class MySpatioTemporalTransformer(nn.Module):
 
         x = x.permute(0, 1, 2, 4, 5, 6, 3)          # [B, T, N, E, X, Y, Z] -> [B, T, N, X, Y, Z, E]; put T, N, X, Y, Z next to each other so they can be squished
         x = x.reshape(B, -1, E)                     # [B, T*N*X*Y*Z, E]
-        # x = torch.cat((x, patientDataEmb), dim=-1)  # [B, T*N*X*Y*Z, E + npatientDataOutFeatures]
 
         if not self.useAttentionPooling and pool:
             # prepend CLS token for classification prediction

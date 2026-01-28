@@ -20,6 +20,7 @@ class RiskFactorPrediction(nn.Module):
 
         self.lossCat = nn.BCEWithLogitsLoss()
         self.lossCont = nn.MSELoss()
+        self.lossWeight = 3
 
     def forward(self, latent: torch.Tensor):
         return self.pred(latent.flatten(1))      # [B, E] -> [B, 45]
@@ -42,7 +43,7 @@ class RiskFactorPrediction(nn.Module):
                     loss.append(self.lossCat(x, factor))
             idx += l
 
-        return torch.cat(out, dim=-1), torch.stack(loss).mean() if len(loss) else None
+        return torch.cat(out, dim=-1), torch.stack(loss).mean()*self.lossWeight if len(loss) else None
 
 class PatientDataEncoding(nn.Module):
     def __init__(self, patientDataPath, embDim):
