@@ -18,7 +18,7 @@ class WarmupCosineAnnealingWithRestarts(_LRScheduler):
     def get_lr(self):
         step = self.last_epoch
 
-        if step < self.warmup_steps:
+        if step < self.warmup_steps and self.warmup_steps > 0:
             scale = step / self.warmup_steps
             return [max(self.minLR, base_lr * scale) for base_lr in self.base_lrs]
 

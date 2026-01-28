@@ -7,7 +7,7 @@ class ClassifierHead(nn.Module):
         self.intermediateFeatures = 64
         self.fc = nn.Sequential(
             nn.LayerNorm(dim),
-            nn.Dropout(0.4),
+            # nn.Dropout(0),
             nn.Linear(dim, self.intermediateFeatures),
             nn.LayerNorm(self.intermediateFeatures),
             nn.ReLU(),

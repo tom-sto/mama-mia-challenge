@@ -11,13 +11,22 @@ class AttentionPooling(nn.Module):
 
         # Learned query vector
         self.q_cls = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
-        nn.init.trunc_normal_(self.q_cls, std=0.02)
+        nn.init.trunc_normal_(self.q_cls, std=0.1)
 
         self.query_proj = nn.Linear(embed_dim, embed_dim)
         self.key_proj = nn.Linear(embed_dim, embed_dim)
         self.value_proj = nn.Linear(embed_dim, embed_dim)
-
         self.out_proj = nn.Linear(embed_dim, embed_dim)
+
+        nn.init.xavier_uniform_(self.query_proj.weight)
+        nn.init.xavier_uniform_(self.key_proj.weight, gain=2.0)
+        nn.init.xavier_uniform_(self.value_proj.weight)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+
+        nn.init.constant_(self.query_proj.bias, 0)
+        nn.init.constant_(self.key_proj.bias, 0)
+        nn.init.constant_(self.value_proj.bias, 0)
+        nn.init.constant_(self.out_proj.bias, 0)
 
     def forward(self, x: torch.Tensor):
         # x: [..., N, E]
@@ -36,10 +45,11 @@ class AttentionPooling(nn.Module):
         v = v.view(*D, N, H, d).transpose(-2, -3).contiguous()      # [..., H, N, d]
 
         # Scaled dot-product attention
-        pooled = nn.functional.scaled_dot_product_attention(q, k, v)
+        # use residual to allow gradients easier flow through query_proj and q_cls
+        pooled = q + nn.functional.scaled_dot_product_attention(q, k, v, scale=1.0)
 
         # Reshape back to [..., E]
-        pooled = pooled.transpose(-2, -3).reshape(*D, E)            # [B, N, E]
+        pooled = pooled.transpose(-2, -3).reshape(*D, E)            # [..., E]
 
         # Final projection
         return self.out_proj(pooled)

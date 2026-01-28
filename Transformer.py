@@ -248,8 +248,8 @@ class MySpatioTemporalTransformer(nn.Module):
         self.clsToken = nn.Parameter(torch.zeros((1, 1, self.embDim)))
 
         layer = TransformerLayer(emb_dim=self.embDim, n_heads=nHeads, dropout=0)
-        self.transformer    = Transformer(layer, num_layers=nLayers)
-        self.poolTokens     = AttentionPooling(self.embDim, nHeads)
+        self.transformer = Transformer(layer, num_layers=nLayers)
+        self.poolTokens = AttentionPooling(self.embDim, nHeads)
 
         self._initialize_weights()
 

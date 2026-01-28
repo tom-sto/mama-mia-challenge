@@ -55,7 +55,7 @@ class PatientDataEncoding(nn.Module):
         self.inFeatures = 45             # one-hot encoding for most variables, continuous for age
         self.outFeatures = 32
         self.patientDataEmbed = nn.Sequential(
-            nn.Dropout(0.3),
+            # nn.Dropout(0.3),
             nn.Linear(self.inFeatures, self.outFeatures)
         )
         self.riskFactorPred = RiskFactorPrediction(self.patientDataDF, embDim, self.inFeatures)

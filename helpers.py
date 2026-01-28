@@ -69,28 +69,15 @@ def _restore_original_shape(arr_interp: torch.Tensor, original_batch_dims: tuple
     else:
         return arr_no_channel.reshape(*original_batch_dims, *new_spatial_dims)
 
-def DownsampleTensor(arr: torch.Tensor, size: int) -> torch.Tensor:
+def ResampleTensor(arr: torch.Tensor, size: int) -> torch.Tensor:
     reshaped_arr, original_batch_dims = _reshape_to_pyt_format(arr)
     newSize = (size, size, size)
-    
-    downsampled_arr: torch.Tensor = F.interpolate(
+
+    resampled_arr: torch.Tensor = F.interpolate(
         reshaped_arr, 
         size=newSize, 
         mode="trilinear", 
         align_corners=True
     )
 
-    return _restore_original_shape(downsampled_arr, original_batch_dims)
-
-def UpsampleTensor(arr: torch.Tensor, size: int) -> torch.Tensor:
-    reshaped_arr, original_batch_dims = _reshape_to_pyt_format(arr)
-    newSize = (size, size, size)
-
-    upsampled_arr: torch.Tensor = F.interpolate(
-        reshaped_arr, 
-        size=newSize, 
-        mode="trilinear", 
-        align_corners=True
-    )
-
-    return _restore_original_shape(upsampled_arr, original_batch_dims)
+    return _restore_original_shape(resampled_arr, original_batch_dims)

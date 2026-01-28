@@ -1,7 +1,7 @@
 import torch
 import os
+import warnings
 import numpy as np
-import matplotlib.pyplot as plt
 import SimpleITK as sitk
 from time import time
 from torch.utils.tensorboard import SummaryWriter
@@ -25,19 +25,24 @@ class MyTrainer():
         self.cat = cat
         self.pool = pool
         self.useJD = useJD
+
+        self.autocastType = torch.float16
+        self.scaleGrads = self.autocastType != torch.bfloat16
+        self.gradScaler = torch.GradScaler(device.type)
+        self.aggregator = UPGrad()
         
         # Parameters to change!
-        self.warmup = 0.01
+        self.warmup = 0
         self.cycles = 2
         # self.pretrainSegmentation = self.nEpochs * (1/self.cycles + self.warmup)        # pretrain for first LR annealing cycle
         self.pretrainSegmentation = 0
         self.pcrConfidence = False
-        self.peakLR = 5e-5
-        self.minLR = 1e-7
+        self.peakLR = 1e-5
+        self.minLR = 1e-6
         self.currentEpoch = 0
         self.oversampleFG = 0.5
         self.oversampleRadius = 0.15
-        self.batchSize = 10
+        self.batchSize = 16
         self.clipGrad = False
         self.downsamplePatch = 2
         self.downsampleImg = 2
@@ -60,7 +65,8 @@ class MyTrainer():
         self.tag = tag
         self.test = test
         self.writer = None
-        if not self.test:
+        # if not self.test:
+        if True:
             self.writer = SummaryWriter(os.path.join(self.outputFolder, f"log{tag}"))
         self.logGradients = True
 
@@ -76,8 +82,7 @@ class MyTrainer():
         nBottleneckLayers = 8
 
         self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
-                            # expectedChannels=[1, 96, 192, 384, 768, 1024],
-                            expectedChannels=[1, 64, 128, 256, 384, 512],
+                            expectedChannels=[1, 64, 128, 256, 384, 512],   #[1, 64, 128, 256, 320, 320]
                             expectedStride=[2, 2, 2, 2, 2],
                             pretrainedDecoderPath=pretrainedDecoderPath,
                             patientDataPath=self.patientDataPath,
@@ -94,26 +99,24 @@ class MyTrainer():
                                                                                  batchSize=self.batchSize, shuffle=True, test=self.test)
         print(f"\tTook {FormatSeconds(time() - dataTime)}")
 
-        paramGroups = [
+        self.paramGroups = [
             {'params': self.model.encoder.parameters(), 
-             'lr': self.peakLR
+             'lr': self.peakLR * 5
             },
             {'params': self.model.bottleneck.parameters(), 
-             'lr': 5e-6
-            },
-            {'params': self.model.decoder.parameters(), 
-             'lr': self.peakLR
-            },
-            {'params': self.model.classifier.parameters(), 
              'lr': self.peakLR * 2
             },
+            {'params': self.model.decoder.parameters(), 
+             'lr': self.peakLR * 5
+            },
+            {'params': self.model.classifier.parameters(), 
+             'lr': self.peakLR * 10
+            },
             {'params': self.model.patientDataMod.parameters(), 
-             'lr': self.peakLR * 0.5
+             'lr': self.peakLR
             }
         ]
-        self.optimizer = torch.optim.AdamW(paramGroups)
-        self.gradScaler = torch.GradScaler(device.type)
-        self.aggregator = UPGrad()
+        self.optimizer = torch.optim.AdamW(self.paramGroups, weight_decay=1e-4, eps=1e-6)
 
         nWarmupSteps = round(self.warmup * self.nEpochs)
         nCycleSteps = round((1 - self.warmup) * self.nEpochs / self.cycles) + 1
@@ -137,9 +140,9 @@ class MyTrainer():
         # If we dont oversample, then the average ratio of background to foreground is used
         # (i don't actually know this number rn, so again just guess that ~5% voxels are foreground)
         # So otherwise, posWeight = 95% / 5% = 19
-        self.bcePosWeightBalanced = min(1 / (self.oversampleFG * x) - 1, 30) if self.oversampleFG != 0 else 19
-        self.bcePosWeightInit = 100
-        self.SegLoss = SegLoss(bcePosWeight=torch.tensor([self.bcePosWeightInit], device=device), downsample=self.downsampleImg, 
+        # self.bcePosWeight = min(1 / (self.oversampleFG * x) - 1, 50) if self.oversampleFG != 0 else 19
+        self.bcePosWeight = 100
+        self.SegLoss = SegLoss(bcePosWeight=torch.tensor([self.bcePosWeight], device=device), downsample=self.downsampleImg, 
                                normalizeTV=False, alpha=self.alpha, beta=self.beta)
 
     def train(self, continueTraining: bool = False, modelName: str = None):
@@ -148,6 +151,8 @@ class MyTrainer():
             self.loadModel(modelName)
             print(f"Continuing training from epoch {self.currentEpoch}")
             self.nEpochs = max(self.currentEpoch + 1, self.nEpochs)
+            # reset optimizer
+            # self.optimizer = torch.optim.AdamW(self.paramGroups, eps=1e-6)
         
         startEpoch = self.currentEpoch
         bestSeg = 0.
@@ -204,11 +209,13 @@ class MyTrainer():
                     phases: torch.Tensor    = phases.transpose(1, 2).to(self.device, non_blocking=True)
                     distMap: torch.Tensor   = distMap.to(self.device, non_blocking=True)
                     target: torch.Tensor    = target.to(self.device, non_blocking=True)
-                    patchIndices            = patchIndices.to(self.device, non_blocking=True)
+                    patchIndices            = patchIndices.to(self.device)
 
-                    phases = DownsampleTensor(phases, PATCH_SIZE)
+                    phases = ResampleTensor(phases, PATCH_SIZE)
 
-                    with torch.autocast(self.device.type):
+                    # with torch.autocast(self.device.type, dtype=self.autocastType):
+                    self.scaleGrads = False
+                    if True:
                         segOut, sharedFeatures, pcrOut, rfpLoss = self.model(phases, patientIDs, patchIndices)
                         loss = 0
                         pcrLoss = None
@@ -225,7 +232,7 @@ class MyTrainer():
                             rfpLossesThisEpoch.append(rfpLoss.item())
 
                         if segOut is not None:
-                            segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
+                            segOut = ResampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
                             segLoss: torch.Tensor = self.SegLoss(segOut, target, distMap)
 
                             bceLoss = self.SegLoss.bc * self.SegLoss.BCWeight
@@ -244,47 +251,51 @@ class MyTrainer():
 
                             totalLoss = loss + segLoss
 
-                            print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {totalLoss:.4f} = BCE Loss: {bceLoss:.4f} + BD Loss: {bdLoss:.4f}{f" + PCR Loss {pcrLoss:.4f} + RFP Loss {rfpLoss:.4f}" if pcrLoss is not None else ""}", end='\r')
+                            print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {totalLoss:.4f} = BCE Loss: {bceLoss:.4f} + BD Loss: {bdLoss:.4f} + TV Loss: {tvLoss:.4f}{f" + PCR Loss {pcrLoss:.4f} + RFP Loss {rfpLoss:.4f}" if pcrLoss is not None else ""}", end='\r')
                         else:
                             print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {loss:.4f} = PCR Loss {pcrLoss:.4f} + RFP Loss {rfpLoss:.4f}", end='\r')
-
-                    del phases, distMap, patchIndices
-
-                    # free as much space as possible before backward()
-                    del segOut, pcrOut, target
                     
+                    del phases, distMap, patchIndices
                     self.optimizer.zero_grad()
                     if self.joint and pcrLoss is not None and not pcrLoss.isnan().any():
                         if self.useJD:
                             assert sharedFeatures is not None, "Cannot do joint backward without shared features!"
-
-                            losses = self.gradScaler.scale([segLoss, loss])
-                            mtl_backward(losses=losses, 
-                                        features=sharedFeatures, 
-                                        aggregator=self.aggregator,
-                                        tasks_params=[list(self.model.decoder.parameters()), 
-                                                      list(self.model.classifier.parameters()) + 
-                                                      list(self.model.patientDataMod.parameters())],
-                                        shared_params=list(self.model.encoder.parameters()) + 
-                                                      list(self.model.bottleneck.parameters()))
+                            
+                            if self.scaleGrads:
+                                losses = self.gradScaler.scale([segLoss, loss])
+                            else:
+                                losses = [segLoss, loss]
+                            with warnings.catch_warnings(action="ignore"):
+                                mtl_backward(losses=losses, 
+                                            features=sharedFeatures, 
+                                            aggregator=self.aggregator,
+                                            tasks_params=[list(self.model.decoder.parameters()), 
+                                                          list(self.model.classifier.parameters()) + 
+                                                          list(self.model.patientDataMod.parameters())],
+                                            shared_params=list(self.model.encoder.parameters()) + 
+                                                          list(self.model.bottleneck.parameters()))
                         else:
-                            scaledLoss = self.gradScaler.scale(totalLoss)
-                            scaledLoss.backward()
+                            _loss = self.gradScaler.scale(totalLoss) if self.scaleGrads else totalLoss
+                            _loss.backward()
                     elif pcrLoss is not None:
-                        scaledLoss = self.gradScaler.scale(loss)
-                        scaledLoss.backward()
+                        _loss = self.gradScaler.scale(loss) if self.scaleGrads else loss
+                        _loss.backward()
                     else:
-                        scaledLoss = self.gradScaler.scale(segLoss)
-                        scaledLoss.backward()
+                        _loss = self.gradScaler.scale(segLoss) if self.scaleGrads else segLoss
+                        _loss.backward()
                     
                     if self.clipGrad:
-                        self.gradScaler.unscale_(self.optimizer)
+                        if self.scaleGrads:
+                            self.gradScaler.unscale_(self.optimizer)
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.)
                     
-                    self.gradScaler.step(self.optimizer)
-                    self.gradScaler.update()
+                    if self.scaleGrads:
+                        self.gradScaler.step(self.optimizer)
+                        self.gradScaler.update()
+                    else:
+                        self.optimizer.step()
 
-                    del loss, segLoss, pcrLoss, sharedFeatures
+                    del segOut, pcrOut, target, loss, segLoss, pcrLoss, sharedFeatures
                 del mris, dmap, seg, pcr
             torch.cuda.empty_cache()
 
@@ -371,9 +382,9 @@ class MyTrainer():
                 target: torch.Tensor    = target.to(self.device, non_blocking=True)
                 patchIndices            = patchIndices.to(self.device)
 
-                phases = DownsampleTensor(phases, PATCH_SIZE)
+                phases = ResampleTensor(phases, PATCH_SIZE)
 
-                with torch.no_grad(), torch.autocast(self.device.type):
+                with torch.no_grad(): #, torch.autocast(self.device.type, dtype=self.autocastType):
                     n = patchIndices.shape[1]
                     allOuts = []
                     for startI in range(0, n, CHUNK_SIZE):
@@ -397,7 +408,7 @@ class MyTrainer():
                         rfpLossesVal.append(rfpLoss.item())
 
                         segOut = torch.cat(segOuts, dim=1)
-                        segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
+                        segOut = ResampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
                         segLoss = self.SegLoss(segOut.float(), target, distMap)
 
                         bceLoss = self.SegLoss.bc * self.SegLoss.BCWeight
@@ -411,7 +422,7 @@ class MyTrainer():
 
                         totalLoss = loss + segLoss
 
-                        print(f"\tValidation Batch {idx+1}/{nBatches}: {totalLoss:.4f} = BCE Loss: {bceLoss:.4f} + BD Loss: {bdLoss:.4f}{f" + PCR Loss {pcrLoss:.4f} + RFP Loss {rfpLoss:.4f}" if pcrLoss is not None else ""}", end='\r')
+                        print(f"\tValidation Batch {idx+1}/{nBatches}: {totalLoss:.4f} = BCE Loss: {bceLoss:.4f} + BD Loss: {bdLoss:.4f} + TV Loss: {tvLoss:.4f}{f" + PCR Loss {pcrLoss:.4f} + RFP Loss {rfpLoss:.4f}" if pcrLoss is not None else ""}", end='\r')
                     else:
                         raise Exception("Not implemented!")
 
@@ -572,15 +583,15 @@ class MyTrainer():
             patchIndices            = patchIndices.to(self.device, non_blocking=True)
             target: torch.Tensor    = target.to(self.device, non_blocking=True)
 
-            phases = DownsampleTensor(phases, PATCH_SIZE)
+            phases = ResampleTensor(phases, PATCH_SIZE)
             truePCRs.append(pcr)
             predsThisBatch = []
-            with torch.no_grad(), torch.autocast(self.device.type):
+            with torch.no_grad(): #, torch.autocast(self.device.type, dtype=self.autocastType):
                 n = patchIndices.shape[1]
                 allOuts = []
                 for startI in range(0, n, CHUNK_SIZE):
                     stopI = min(startI + CHUNK_SIZE, n)
-                    out = self.model(phases[:, :, startI:stopI], patientIDs, patchIndices[:, startI:stopI], DownsampleTensor(target.float(), PATCH_SIZE)[:, startI:stopI])
+                    out = self.model(phases[:, :, startI:stopI], patientIDs, patchIndices[:, startI:stopI])
                     allOuts.append(out)    
                     del out
                 segOuts, _, pcrOuts, _ = zip(*allOuts)
@@ -590,7 +601,7 @@ class MyTrainer():
                     predsThisBatch.append(pcrOut)
 
                     segOut = torch.cat(segOuts, dim=1)
-                    segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
+                    segOut = ResampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
             del phases
 
             if None not in pcrOuts:
@@ -717,9 +728,9 @@ if __name__ == "__main__":
     pretrainedDecoderPath = None
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    cat = 128
+    cat = 96
     pool = True
-    tag = f"Jan27-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}UpweightPCRLoss-MaxPoolVal"
+    tag = f"Jan28-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}NoAutocast-FixAttnPooling-WeightDecay1e-4-LR1e-5"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS
