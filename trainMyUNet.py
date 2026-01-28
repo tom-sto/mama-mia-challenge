@@ -26,7 +26,7 @@ class MyTrainer():
         self.pool = pool
         self.useJD = useJD
 
-        self.autocastType = torch.float16
+        self.autocastType = torch.bfloat16
         self.scaleGrads = self.autocastType != torch.bfloat16
         self.gradScaler = torch.GradScaler(device.type)
         self.aggregator = UPGrad()
@@ -37,8 +37,8 @@ class MyTrainer():
         # self.pretrainSegmentation = self.nEpochs * (1/self.cycles + self.warmup)        # pretrain for first LR annealing cycle
         self.pretrainSegmentation = 0
         self.pcrConfidence = False
-        self.peakLR = 1e-5
-        self.minLR = 1e-6
+        self.peakLR = 1e-4
+        self.minLR = 1e-5
         self.currentEpoch = 0
         self.oversampleFG = 0.5
         self.oversampleRadius = 0.15
@@ -65,8 +65,7 @@ class MyTrainer():
         self.tag = tag
         self.test = test
         self.writer = None
-        # if not self.test:
-        if True:
+        if not self.test:
             self.writer = SummaryWriter(os.path.join(self.outputFolder, f"log{tag}"))
         self.logGradients = True
 
@@ -104,7 +103,7 @@ class MyTrainer():
              'lr': self.peakLR * 5
             },
             {'params': self.model.bottleneck.parameters(), 
-             'lr': self.peakLR * 2
+             'lr': self.peakLR
             },
             {'params': self.model.decoder.parameters(), 
              'lr': self.peakLR * 5
@@ -113,10 +112,11 @@ class MyTrainer():
              'lr': self.peakLR * 10
             },
             {'params': self.model.patientDataMod.parameters(), 
-             'lr': self.peakLR
+             'lr': self.peakLR * 2
             }
         ]
         self.optimizer = torch.optim.AdamW(self.paramGroups, weight_decay=1e-4, eps=1e-6)
+        # self.optimizer = torch.optim.SGD(self.paramGroups)
 
         nWarmupSteps = round(self.warmup * self.nEpochs)
         nCycleSteps = round((1 - self.warmup) * self.nEpochs / self.cycles) + 1
@@ -213,9 +213,7 @@ class MyTrainer():
 
                     phases = ResampleTensor(phases, PATCH_SIZE)
 
-                    # with torch.autocast(self.device.type, dtype=self.autocastType):
-                    self.scaleGrads = False
-                    if True:
+                    with torch.autocast(self.device.type, dtype=self.autocastType):
                         segOut, sharedFeatures, pcrOut, rfpLoss = self.model(phases, patientIDs, patchIndices)
                         loss = 0
                         pcrLoss = None
@@ -249,12 +247,16 @@ class MyTrainer():
                             dice = Dice(segOut.detach().cpu(), target.detach().cpu())
                             diceThisEpoch.append(dice)
 
-                            totalLoss = loss + segLoss
+                            totalLoss = loss * 20 + segLoss * 10
 
                             print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {totalLoss:.4f} = BCE Loss: {bceLoss:.4f} + BD Loss: {bdLoss:.4f} + TV Loss: {tvLoss:.4f}{f" + PCR Loss {pcrLoss:.4f} + RFP Loss {rfpLoss:.4f}" if pcrLoss is not None else ""}", end='\r')
                         else:
                             print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {loss:.4f} = PCR Loss {pcrLoss:.4f} + RFP Loss {rfpLoss:.4f}", end='\r')
                     
+                    # for name, p in self.model.named_parameters():
+                    #     if p.grad is not None:
+                    #         self.writer.add_scalar(name, p.grad.norm().item(), idx*3 + i)
+
                     del phases, distMap, patchIndices
                     self.optimizer.zero_grad()
                     if self.joint and pcrLoss is not None and not pcrLoss.isnan().any():
@@ -329,6 +331,7 @@ class MyTrainer():
                                                                    "BCE": Mean(bcePCRLossesThisEpoch)}, self.currentEpoch)
 
                 if self.currentEpoch % 10 == 0 and self.logGradients:
+                # if self.logGradients:
                     current_lrs = self.LRScheduler.get_last_lr() 
                     
                     for i, group in enumerate(self.optimizer.param_groups):
@@ -384,7 +387,7 @@ class MyTrainer():
 
                 phases = ResampleTensor(phases, PATCH_SIZE)
 
-                with torch.no_grad(): #, torch.autocast(self.device.type, dtype=self.autocastType):
+                with torch.no_grad(), torch.autocast(self.device.type, dtype=self.autocastType):
                     n = patchIndices.shape[1]
                     allOuts = []
                     for startI in range(0, n, CHUNK_SIZE):
