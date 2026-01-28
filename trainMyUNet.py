@@ -317,9 +317,26 @@ class MyTrainer():
                                                                    "BCE": Mean(bcePCRLossesThisEpoch)}, self.currentEpoch)
 
                 if self.currentEpoch % 10 == 0 and self.logGradients:
-                    for name, param in self.model.named_parameters():
-                        if param.grad is not None and any(k in name for k in ["encoder", "bottleneck", "decoder", "classifier", "patientData"]):
-                            self.writer.add_histogram(f'Training Gradients/{name}', param.grad, self.currentEpoch)
+                    current_lrs = self.LRScheduler.get_last_lr() 
+                    
+                    for i, group in enumerate(self.optimizer.param_groups):
+                        group_lr = current_lrs[i]
+                        
+                        for name, param in self.model.named_parameters():
+                            # Check if this parameter belongs to the current optimizer group
+                            if any(p is param for p in group['params']):
+                                if param.grad is not None and any(k in name for k in ["encoder", "bottleneck", "decoder", "classifier", "patientData"]):
+                                    w_norm = param.data.norm(2)
+                                    g_norm = param.grad.norm(2)
+                                    
+                                    update_ratio = (group_lr * g_norm) / (w_norm + 1e-8)
+                                    
+                                    self.writer.add_histogram(f'Training Gradients/{name}', param.grad, self.currentEpoch)
+                                    self.writer.add_histogram(f'Parameter Magnitudes/{name}', param.data, self.currentEpoch)
+                                    
+                                    # Log the ratio as a scalar to see "learning velocity"
+                                    self.writer.add_scalar(f'Update_to_Weight_Ratio/{name}', update_ratio.item(), self.currentEpoch)
+                                    self.writer.add_scalar(f'Weight_Norms/{name}', w_norm.item(), self.currentEpoch)
 
             print(f"\tTraining loop took {FormatSeconds(time() - startEpoch)}")
             
@@ -344,7 +361,7 @@ class MyTrainer():
 
             nBatches = len(self.vlDataloader)
             for idx, struct in enumerate(self.vlDataloader):        # iterate over patient cases
-                mris, dmap, seg, pcr, bbox, patientIDs = zip(*struct)
+                mris, dmap, seg, pcr, bbox, patientID = zip(*struct)
                 truePCRs.append(pcr)
                 phases, distMap, target, patchIndices = GetPatches(mris, dmap, seg, PATCH_SIZE * self.downsamplePatch, 
                                                                    NUM_PATCHES, 0, 0, bbox, self.downsampleImg, True)
@@ -360,17 +377,17 @@ class MyTrainer():
                     allOuts = []
                     for startI in range(0, n, CHUNK_SIZE):
                         stopI = min(startI + CHUNK_SIZE, n)
-                        out = self.model(phases[:, :, startI:stopI], patientIDs, patchIndices[:, startI:stopI])
+                        out = self.model(phases[:, :, startI:stopI], patientID, patchIndices[:, startI:stopI])
                         allOuts.append(out)
                         del out
 
                     segOuts, _, pcrOuts, rfpLosses = zip(*allOuts)
                     if self.joint:
-                        pcrOut = torch.cat(pcrOuts, dim=1).mean()
+                        pcrOut = torch.cat(pcrOuts, dim=1).max()        # could potentially use another scaling function here
                         pcrLoss = self.PCRloss(pcrOut.unsqueeze(-1), pcr)
                         rfpLoss = torch.stack(rfpLosses).mean()
                         loss: torch.Tensor = pcrLoss + rfpLoss if pcrLoss is not None else rfpLoss
-                        predPCRs.append(pcrOut.mean())
+                        predPCRs.append(pcrOut)
 
                         if pcrLoss is not None:
                             bcePCRLossesVal.append(pcrLoss.item())
@@ -406,7 +423,7 @@ class MyTrainer():
                 diceFull = []
                 sens = []
                 spec = []
-                for i in range(len(patientIDs)):
+                for i in range(len(patientID)):
                     dicePatches.append(Dice(segOut[i], target[i]))
 
                     segImageArr     = ReconstructImageFromPatches(segOut[i], patchIndices[i], PATCH_SIZE * self.downsamplePatch)
@@ -473,7 +490,7 @@ class MyTrainer():
                     avgPCRValLoss = Mean(pcrLossesVal)
                     self.writer.add_scalars("PCR Loss/Validation", {"Overall": avgPCRValLoss,
                                                                      "RFP": Mean(rfpLossesVal),
-                                                                     "BCE": Mean(bceLossesVal)}, self.currentEpoch)
+                                                                     "BCE": Mean(bcePCRLossesVal)}, self.currentEpoch)
                     self.writer.add_scalars("PCR AUC", {"Train": trAuc, "Val": vlAuc}, self.currentEpoch)
                     self.writer.add_scalars("PCR PR AUC", {"Train": trPrauc, "Val": vlPrauc}, self.currentEpoch)
                     self.writer.add_scalars("Sensitivity", {"Train": trSens, "Val": vlSens}, self.currentEpoch)
@@ -567,9 +584,9 @@ class MyTrainer():
                     del out
                 segOuts, _, pcrOuts, _ = zip(*allOuts)
                 if self.joint:
-                    pcrOut = torch.cat(pcrOuts, dim=1)
-                    predPCRs.append(pcrOut.float().mean().item())
-                    predsThisBatch.append(pcrOut.float().mean().item())
+                    pcrOut = torch.cat(pcrOuts, dim=1).float().max().item()
+                    predPCRs.append(pcrOut)
+                    predsThisBatch.append(pcrOut)
 
                     segOut = torch.cat(segOuts, dim=1)
                     segOut = UpsampleTensor(segOut, PATCH_SIZE * self.downsamplePatch)
@@ -701,7 +718,7 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     cat = 128
     pool = True
-    tag = f"Jan26-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}MoreClassifierDropoutAndSmallerPatientFeatureEmbedding"
+    tag = f"Jan27-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}UpweightPCRLoss-MaxPoolVal"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS
