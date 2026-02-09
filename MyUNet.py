@@ -3,7 +3,7 @@ from Transformer import MyTransformerTS, MyTransformerST, MySpatioTemporalTransf
 from Bottleneck import *
 from PCRClassifier import ClassifierHead
 from PatchEmbed import PatchEncoder, PatchDecoder
-from AttentionPooling import AttentionPooling
+from AttentionPooling import AttentionPooling, AvgPooling
 import helpers
 from Encodings import PatientDataEncoding, PositionEncoding3D
 
@@ -30,7 +30,8 @@ class MyUNet(torch.nn.Module):
         
         self.encoder = PatchEncoder(expectedChannels, expectedStride, dropout=0, useSkips=useSkips)
         self.decoder = PatchDecoder(expectedChannels, catPosDecoder, useSkips=useSkips)
-        self.poolSkips = AttentionPooling(expectedChannels[-1], nHeads)
+        self.poolSeg = AttentionPooling(expectedChannels[-1], nHeads)
+        self.poolPcr = AvgPooling()
         self.patientDataMod = PatientDataEncoding(patientDataPath, expectedChannels[-1])
         
         if pretrainedDecoderPath is not None:
@@ -64,18 +65,23 @@ class MyUNet(torch.nn.Module):
         B, N = shape[0], shape[2]
 
         acqTimes = self.patientDataMod.AcquisitionTimes(shape, patientIDs, mri.device)
-        sharedFeatures: torch.Tensor = self.bottleneck(x, shape, patchIdxs, acqTimes)    # [B, E]
+        sharedFeatures: torch.Tensor = self.bottleneck(x, shape, patchIdxs, acqTimes, pool=False)    # [B, E]
         E = sharedFeatures.shape[-1]
 
         if self.ret == "all" or self.ret == "pcr":
-            patientDataEmb, rfpLoss = self.patientDataMod(sharedFeatures, patientIDs)                       # [B, R]
-            pcrOut: torch.Tensor = self.classifier(torch.cat([sharedFeatures, patientDataEmb], dim=-1))     # [B, E + R] -> [B, 1]
+            pooledFeatures = self.poolPcr(sharedFeatures)
+            patientDataEmb, rfpLoss = self.patientDataMod(pooledFeatures, patientIDs)                       # [B, R]
+            pcrOut: torch.Tensor = self.classifier(torch.cat([pooledFeatures, patientDataEmb], dim=-1))     # [B, E + R] -> [B, 1]
             if self.ret == "pcr":
                 return None, sharedFeatures, pcrOut, rfpLoss
             
         if self.catPosDecoder is not None:
             posEnc = PositionEncoding3D(patchIdxs, dim=self.catPosDecoder)              # [B, N, C]
-            x = torch.cat([posEnc, sharedFeatures.unsqueeze(1).repeat(1, N, 1)], dim=-1)
+            if not self.poolSeg:
+                x = torch.cat([posEnc, sharedFeatures.reshape(B, N, E)], dim=-1)
+            else:
+                pooledFeatures: torch.Tensor = self.poolSeg(sharedFeatures)
+                x = torch.cat([posEnc, pooledFeatures.unsqueeze(1).repeat(1, N, 1)], dim=-1)
             x = x.reshape(-1, E + self.catPosDecoder)[..., None, None, None]            # [B*N, E + C, 1, 1, 1]
         else:
             posEnc = PositionEncoding3D(patchIdxs, dim=E)           # [B, N, E]

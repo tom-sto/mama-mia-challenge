@@ -5,7 +5,7 @@ class PCRLoss(nn.Module):
     def __init__(self):
         super(PCRLoss, self).__init__()
         self.bce = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(2.4))  # this data set sees 70% negative, 30% positive
-        self.lossWeight = 5
+        self.lossWeight = 50
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor):
         # Convert list to tensor if needed
@@ -138,9 +138,9 @@ class SegLoss(nn.Module):
                  alpha: float = 0.5, beta: float = 0.5):
         super().__init__()
 
-        self.BCWeight  = 1
-        self.BDWeight  = 1 / downsample
-        self.TVWeight  = 2
+        self.BCWeight  = 4
+        self.BDWeight  = 2 / downsample
+        self.TVWeight  = 6
 
         self.BCLoss = nn.BCEWithLogitsLoss(pos_weight=bcePosWeight)
         self.BDLoss = BoundaryLoss(class_idx=0)

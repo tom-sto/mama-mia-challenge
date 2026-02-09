@@ -1,8 +1,10 @@
 import torch
 import os
 import warnings
+import contextlib
 import numpy as np
 import SimpleITK as sitk
+from collections import defaultdict
 from time import time
 from torch.utils.tensorboard import SummaryWriter
 from torchjd.aggregation import UPGrad
@@ -26,8 +28,9 @@ class MyTrainer():
         self.pool = pool
         self.useJD = useJD
 
-        self.autocastType = torch.bfloat16
-        self.scaleGrads = self.autocastType != torch.bfloat16
+        # self.autocastType = torch.bfloat16
+        self.autocastType = None
+        self.scaleGrads = self.autocastType and self.autocastType != torch.bfloat16
         self.gradScaler = torch.GradScaler(device.type)
         self.aggregator = UPGrad()
         
@@ -38,7 +41,7 @@ class MyTrainer():
         self.pretrainSegmentation = 0
         self.pcrConfidence = False
         self.peakLR = 1e-4
-        self.minLR = 1e-5
+        self.minLR = 5e-6
         self.currentEpoch = 0
         self.oversampleFG = 0.5
         self.oversampleRadius = 0.15
@@ -78,7 +81,7 @@ class MyTrainer():
 
         self.device = device
         nHeads = 32
-        nBottleneckLayers = 8
+        nBottleneckLayers = 4
 
         self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
                             expectedChannels=[1, 64, 128, 256, 384, 512],   #[1, 64, 128, 256, 320, 320]
@@ -92,6 +95,7 @@ class MyTrainer():
                             bottleneck=bottleneck,
                             nBottleneckLayers=nBottleneckLayers,
                             useAttentionPooling=self.pool).to(device)
+        self.modules = ["encoder", "bottleneck", "decoder", "classifier", "patientDataMod"]
 
         dataTime = time()
         self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, self.patientDataPath, self.trainingCompose, self.valTestCompose,
@@ -100,22 +104,23 @@ class MyTrainer():
 
         self.paramGroups = [
             {'params': self.model.encoder.parameters(), 
-             'lr': self.peakLR * 5
+             'lr': self.peakLR * 2
             },
             {'params': self.model.bottleneck.parameters(), 
-             'lr': self.peakLR
+             'lr': self.peakLR * 0.5
             },
             {'params': self.model.decoder.parameters(), 
-             'lr': self.peakLR * 5
+             'lr': self.peakLR
             },
             {'params': self.model.classifier.parameters(), 
-             'lr': self.peakLR * 10
+             'lr': self.peakLR * 5
             },
             {'params': self.model.patientDataMod.parameters(), 
              'lr': self.peakLR * 2
             }
         ]
-        self.optimizer = torch.optim.AdamW(self.paramGroups, weight_decay=1e-4, eps=1e-6)
+        # self.optimizer = torch.optim.AdamW(self.paramGroups, weight_decay=1e-4, eps=1e-6)
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.peakLR, weight_decay=1e-4, eps=1e-6)
         # self.optimizer = torch.optim.SGD(self.paramGroups)
 
         nWarmupSteps = round(self.warmup * self.nEpochs)
@@ -213,7 +218,7 @@ class MyTrainer():
 
                     phases = ResampleTensor(phases, PATCH_SIZE)
 
-                    with torch.autocast(self.device.type, dtype=self.autocastType):
+                    with torch.autocast(self.device.type, dtype=self.autocastType) if self.autocastType else contextlib.suppress():
                         segOut, sharedFeatures, pcrOut, rfpLoss = self.model(phases, patientIDs, patchIndices)
                         loss = 0
                         pcrLoss = None
@@ -247,15 +252,24 @@ class MyTrainer():
                             dice = Dice(segOut.detach().cpu(), target.detach().cpu())
                             diceThisEpoch.append(dice)
 
-                            totalLoss = loss * 20 + segLoss * 10
+                            totalLoss = loss + segLoss
 
                             print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {totalLoss:.4f} = BCE Loss: {bceLoss:.4f} + BD Loss: {bdLoss:.4f} + TV Loss: {tvLoss:.4f}{f" + PCR Loss {pcrLoss:.4f} + RFP Loss {rfpLoss:.4f}" if pcrLoss is not None else ""}", end='\r')
                         else:
                             print(f"\tTraining Batch {idx + (1 + i) / nHandles:.2f}/{nBatches:.2f}: {loss:.4f} = PCR Loss {pcrLoss:.4f} + RFP Loss {rfpLoss:.4f}", end='\r')
                     
-                    # for name, p in self.model.named_parameters():
-                    #     if p.grad is not None:
-                    #         self.writer.add_scalar(name, p.grad.norm().item(), idx*3 + i)
+                    if True:
+                        gradientDict = defaultdict(dict)
+                        for name, p in self.model.named_parameters():
+                            if p.grad is None or (p.grad == 0).all():
+                                continue
+                            split = name.split(".")
+                            wOrB = "weight" if "weight" in name else "bias"
+                            moduleName = f"{split[0]}/{split[1]}-{wOrB}"
+                            layerName = ".".join(split[2:])
+                            gradientDict[moduleName][layerName] = p.grad.norm(2).item() / (p.data.norm(2).item() + 1e-8)
+                        for k, v in gradientDict.items():
+                            self.writer.add_scalars(k, v, self.currentEpoch*357 + 3*idx + i)
 
                     del phases, distMap, patchIndices
                     self.optimizer.zero_grad()
@@ -340,7 +354,7 @@ class MyTrainer():
                         for name, param in self.model.named_parameters():
                             # Check if this parameter belongs to the current optimizer group
                             if any(p is param for p in group['params']):
-                                if param.grad is not None and any(k in name for k in ["encoder", "bottleneck", "decoder", "classifier", "patientData"]):
+                                if param.grad is not None and any(k in name for k in self.modules):
                                     w_norm = param.data.norm(2)
                                     g_norm = param.grad.norm(2)
                                     
@@ -387,7 +401,7 @@ class MyTrainer():
 
                 phases = ResampleTensor(phases, PATCH_SIZE)
 
-                with torch.no_grad(), torch.autocast(self.device.type, dtype=self.autocastType):
+                with torch.no_grad(), torch.autocast(self.device.type, dtype=self.autocastType) if self.autocastType else contextlib.suppress():
                     n = patchIndices.shape[1]
                     allOuts = []
                     for startI in range(0, n, CHUNK_SIZE):
@@ -398,7 +412,7 @@ class MyTrainer():
 
                     segOuts, _, pcrOuts, rfpLosses = zip(*allOuts)
                     if self.joint:
-                        pcrOut = torch.cat(pcrOuts, dim=1).max()        # could potentially use another scaling function here
+                        pcrOut = torch.cat(pcrOuts, dim=1).mean()        # could potentially use another scaling function here
                         pcrLoss = self.PCRloss(pcrOut.unsqueeze(-1), pcr)
                         rfpLoss = torch.stack(rfpLosses).mean()
                         loss: torch.Tensor = pcrLoss + rfpLoss if pcrLoss is not None else rfpLoss
@@ -589,7 +603,7 @@ class MyTrainer():
             phases = ResampleTensor(phases, PATCH_SIZE)
             truePCRs.append(pcr)
             predsThisBatch = []
-            with torch.no_grad(): #, torch.autocast(self.device.type, dtype=self.autocastType):
+            with torch.no_grad(), torch.autocast(self.device.type, dtype=self.autocastType) if self.autocastType else contextlib.suppress():
                 n = patchIndices.shape[1]
                 allOuts = []
                 for startI in range(0, n, CHUNK_SIZE):
@@ -599,7 +613,7 @@ class MyTrainer():
                     del out
                 segOuts, _, pcrOuts, _ = zip(*allOuts)
                 if self.joint:
-                    pcrOut = torch.cat(pcrOuts, dim=1).float().max().item()
+                    pcrOut = torch.cat(pcrOuts, dim=1).float().mean().item()
                     predPCRs.append(pcrOut)
                     predsThisBatch.append(pcrOut)
 
@@ -733,7 +747,7 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     cat = 96
     pool = True
-    tag = f"Jan28-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}NoAutocast-FixAttnPooling-WeightDecay1e-4-LR1e-5"
+    tag = f"Feb09-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}NoAutocast-SeparatePooling-ClassifierDropout-WeightDecay1e-4-LR1e-4-JD"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS
@@ -743,7 +757,7 @@ if __name__ == "__main__":
     joint = True
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"Joint" if joint else ""}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=800, modelName=modelName, tag=tag, joint=joint, cat=cat, pool=pool, useJD=False, test=test)
+    trainer = MyTrainer(nEpochs=800, modelName=modelName, tag=tag, joint=joint, cat=cat, pool=pool, useJD=True, test=test)
     
     trainer.setup(dataDir, 
                   device, 

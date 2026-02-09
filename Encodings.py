@@ -12,7 +12,7 @@ class RiskFactorPrediction(nn.Module):
         self.pred = nn.Sequential(
             nn.LayerNorm(embDim),
             nn.Linear(embDim, self.hiddenDim),
-            nn.GroupNorm(num_groups=self.outDim, num_channels=self.hiddenDim),
+            nn.LayerNorm(self.hiddenDim),
             nn.ReLU(),
             nn.Dropout(),
             nn.Linear(self.hiddenDim, self.outDim)
@@ -20,7 +20,7 @@ class RiskFactorPrediction(nn.Module):
 
         self.lossCat = nn.BCEWithLogitsLoss()
         self.lossCont = nn.MSELoss()
-        self.lossWeight = 3
+        self.lossWeight = 30
 
     def forward(self, latent: torch.Tensor):
         return self.pred(latent.flatten(1))      # [B, E] -> [B, 45]
@@ -53,10 +53,13 @@ class PatientDataEncoding(nn.Module):
         self.patientDataDF = pd.read_excel(patientDataPath, sheet_name="dataset_info")
 
         self.inFeatures = 45             # one-hot encoding for most variables, continuous for age
-        self.outFeatures = 32
+        self.outFeatures = 64
         self.patientDataEmbed = nn.Sequential(
             # nn.Dropout(0.3),
-            nn.Linear(self.inFeatures, self.outFeatures)
+            nn.Linear(self.inFeatures, self.outFeatures),
+            nn.LayerNorm(self.outFeatures),
+            nn.ReLU(),
+            nn.Linear(self.outFeatures, self.outFeatures)
         )
         self.riskFactorPred = RiskFactorPrediction(self.patientDataDF, embDim, self.inFeatures)
 
@@ -183,7 +186,7 @@ def PositionEncoding4D(seq: torch.Tensor, dim: int, normalize01: bool = False):
 
     posEnc = torch.cat([tEnc, xEnc, yEnc, zEnc], dim=-1)
     if normalize01:
-        return (posEnc + posEnc.min()) / (posEnc.max() - posEnc.min())
+        return (posEnc - posEnc.min()) / (posEnc.max() - posEnc.min())
     return posEnc
 
 def CleanPatientData(df: pd.DataFrame, 

@@ -2,7 +2,7 @@ import copy
 import pandas as pd
 import torch
 import torch.nn as nn
-from AttentionPooling import AttentionPooling
+from AttentionPooling import AttentionPooling, AvgPooling
 from Encodings import *
 
 class MyTransformerTS(nn.Module):
@@ -247,9 +247,13 @@ class MySpatioTemporalTransformer(nn.Module):
 
         self.clsToken = nn.Parameter(torch.zeros((1, 1, self.embDim)))
 
-        layer = TransformerLayer(emb_dim=self.embDim, n_heads=nHeads, dropout=0)
+        self.preNorm1 = nn.LayerNorm(self.embDim)
+        self.preNorm2 = nn.LayerNorm(self.embDim)
+
+        layer = TransformerLayer(emb_dim=self.embDim, n_heads=nHeads)
         self.transformer = Transformer(layer, num_layers=nLayers)
-        self.poolTokens = AttentionPooling(self.embDim, nHeads)
+        # self.poolTokens = AttentionPooling(self.embDim, nHeads)
+        self.poolTokens = AvgPooling()
 
         self._initialize_weights()
 
@@ -273,15 +277,19 @@ class MySpatioTemporalTransformer(nn.Module):
         x = x.permute(0, 1, 2, 4, 5, 6, 3)          # [B, T, N, E, X, Y, Z] -> [B, T, N, X, Y, Z, E]; put T, N, X, Y, Z next to each other so they can be squished
         x = x.reshape(B, -1, E)                     # [B, T*N*X*Y*Z, E]
 
+        x = self.preNorm1(x)
+
         if not self.useAttentionPooling and pool:
             # prepend CLS token for classification prediction
             tok = self.clsToken.expand(B, -1, -1)           # [B, 1, E]
             x = torch.cat((tok, x), dim=1)                  # [B, 1 + T*N*X*Y*Z, E].
 
         timeSpaceIndices = torch.cat([acqTimes.unsqueeze(-1), patchIndices.repeat(1, T, 1)], dim=-1)
-        posEnc: torch.Tensor = PositionEncoding4D(timeSpaceIndices, dim = E, normalize01=True)
+        posEnc: torch.Tensor = PositionEncoding4D(timeSpaceIndices, dim = E, normalize01=False)
 
         x[:, -T*N*X*Y*Z:] = x[:, -T*N*X*Y*Z:] + posEnc
+
+        x = self.preNorm2(x)
         x = self.transformer(x)                     # [B, T*N*X*Y*Z (+1?), E]
         
         if self.useAttentionPooling and pool:
@@ -290,7 +298,8 @@ class MySpatioTemporalTransformer(nn.Module):
             x = x[:, 0]                         # [B, E]
         elif T > 1:
             # pool just the phases
-            x = self.poolTokens(x.view(B*N, T, E))
+            x = x.reshape(B, T, N, E).transpose(1, 2).reshape(B*N, T, E)
+            x = self.poolTokens(x)
             x = x.view(B, N, E).contiguous()
         return x                                # [B, N, E]
 
@@ -325,7 +334,7 @@ class TransformerLayer(nn.Module):
         self.linear1    = nn.Linear(emb_dim, dim_feedforward)
         self.dropout    = nn.Dropout(dropout)
         self.linear2    = nn.Linear(dim_feedforward, emb_dim)
-        self.activation = nn.GELU()
+        self.activation = nn.ReLU()
 
         self.norm1      = nn.LayerNorm(emb_dim, eps=layer_norm_eps)
         self.norm2      = nn.LayerNorm(emb_dim, eps=layer_norm_eps)

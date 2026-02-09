@@ -23,7 +23,7 @@ class PatchEncoder(nn.Module):
         for i in range(numBlocks):
             encBlock = nn.Sequential(
                 nn.Dropout3d(dropout) if i == numBlocks - 1 else nn.Identity(),
-                nn.GroupNorm(num_groups=min(8, channels[i]), num_channels=channels[i]) if i > 0 and i < numBlocks - 1 else nn.Identity(),
+                nn.GroupNorm(num_groups=channels[i], num_channels=channels[i]) if i < numBlocks - 1 else nn.Identity(),
                 nn.Conv3d(channels[i], channels[i + 1], kernel_size=3, padding=1),
                 nn.ReLU(True),
                 nn.Conv3d(channels[i + 1], channels[i + 1], kernel_size=3, stride=strides[i], padding=1),
@@ -79,38 +79,38 @@ class PatchDecoder(nn.Module):
                 if i == 0 and catPosDecoder is not None:
                     decBlock = nn.Sequential(
                         nn.ConvTranspose3d(2*channels[-(i+1)] + catPosDecoder, channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
-                        nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]),
+                        nn.GroupNorm(num_groups=channels[-(i+2)], num_channels=channels[-(i+2)]),
                         nn.ReLU(True),
                         nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
-                        nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]) if i > 0 and i < numBlocks - 1 else nn.Identity(),
+                        nn.GroupNorm(num_groups=channels[-(i+2)], num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
                         nn.ReLU(True) if i < numBlocks - 1 else nn.Identity(),
                     )
                 else:
                     decBlock = nn.Sequential(
                         nn.ConvTranspose3d(2*channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
-                        nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]),
+                        nn.GroupNorm(num_groups=channels[-(i+2)], num_channels=channels[-(i+2)]),
                         nn.ReLU(True),
                         nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
-                        nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]) if i > 0 and i < numBlocks - 1 else nn.Identity(),
+                        nn.GroupNorm(num_groups=channels[-(i+2)], num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
                         nn.ReLU(True) if i < numBlocks - 1 else nn.Identity(),
                     )
             else:
                 if i == 0 and catPosDecoder is not None:
                     decBlock = nn.Sequential(
                         nn.ConvTranspose3d(channels[-(i+1)] + catPosDecoder, channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
-                        nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]),
+                        nn.GroupNorm(num_groups=channels[-(i+2)], num_channels=channels[-(i+2)]),
                         nn.ReLU(True),
                         nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
-                        nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]) if i > 0 and i < numBlocks - 1 else nn.Identity(),
+                        nn.GroupNorm(num_groups=channels[-(i+2)], num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
                         nn.ReLU(True) if i < numBlocks - 1 else nn.Identity(),
                     )
                 else:
                     decBlock = nn.Sequential(
                         nn.ConvTranspose3d(channels[-(i+1)], channels[-(i+2)], kernel_size=3, stride=2, padding=1, output_padding=1),
-                        nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]),
+                        nn.GroupNorm(num_groups=channels[-(i+2)], num_channels=channels[-(i+2)]),
                         nn.ReLU(True),
                         nn.Conv3d(channels[-(i+2)], channels[-(i+2)], kernel_size=3, padding=1),
-                        nn.GroupNorm(num_groups=min(8, channels[-(i+2)]), num_channels=channels[-(i+2)]) if i > 0 and i < numBlocks - 1 else nn.Identity(),
+                        nn.GroupNorm(num_groups=channels[-(i+2)], num_channels=channels[-(i+2)]) if i < numBlocks - 1 else nn.Identity(),
                         nn.ReLU(True) if i < numBlocks - 1 else nn.Identity(),
                     )
 

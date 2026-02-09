@@ -19,7 +19,7 @@ class AttentionPooling(nn.Module):
         self.out_proj = nn.Linear(embed_dim, embed_dim)
 
         nn.init.xavier_uniform_(self.query_proj.weight)
-        nn.init.xavier_uniform_(self.key_proj.weight, gain=2.0)
+        nn.init.xavier_uniform_(self.key_proj.weight)
         nn.init.xavier_uniform_(self.value_proj.weight)
         nn.init.xavier_uniform_(self.out_proj.weight)
 
@@ -53,3 +53,10 @@ class AttentionPooling(nn.Module):
 
         # Final projection
         return self.out_proj(pooled)
+    
+class AvgPooling(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor):
+        return x.mean(dim=1)
