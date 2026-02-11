@@ -70,7 +70,7 @@ class MyTrainer():
         self.writer = None
         if not self.test:
             self.writer = SummaryWriter(os.path.join(self.outputFolder, f"log{tag}"))
-        self.logGradients = True
+        self.logGradients = False
 
     def setup(self,
               dataDir: str,
@@ -747,7 +747,7 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     cat = 96
     pool = True
-    tag = f"Feb09-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}NoAutocast-SeparatePooling-ClassifierDropout-WeightDecay1e-4-LR1e-4-JD"
+    tag = f"Feb10-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}NoAutocast-SeparatePooling-LessClassifierDropout-WeightDecay1e-4-LR1e-4-JD"
     # tag = "Oct24-DownsampleImagesWithPCR"
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS

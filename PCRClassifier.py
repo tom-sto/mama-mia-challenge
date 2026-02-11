@@ -11,11 +11,11 @@ class ClassifierHead(nn.Module):
             nn.Linear(dim, self.intermediateFeatures[0]),
             nn.LayerNorm(self.intermediateFeatures[0]),
             nn.ReLU(),
-            nn.Dropout(0.25),
+            nn.Dropout(0.1),
             nn.Linear(self.intermediateFeatures[0], self.intermediateFeatures[1]),
             nn.LayerNorm(self.intermediateFeatures[1]),
             nn.ReLU(),
-            nn.Dropout(),
+            nn.Dropout(0.3),
             nn.Linear(self.intermediateFeatures[1], 2)
         )
 
