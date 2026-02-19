@@ -16,7 +16,7 @@ from Augmenter import GetNoTransforms, GetTrainingTransforms
 
 class MyTrainer():
     def __init__(self, nEpochs: int, modelName: str = "", tag: str = "", mode: int = 0, cat: bool = True, stopEarly: int = None, 
-                 pool: bool = False, patientDataPath="clinical_and_imaging_info.xlsx", test: bool = False):
+                 pool: bool = False, patientDataPath="clinical_and_imaging_info.xlsx", test: bool = False, predSegPath: str = None):
         self.nEpochs = nEpochs
         self.stopAfterPlateauEpochs = stopEarly if stopEarly else 10_000_000
         self.mode = mode
@@ -25,21 +25,22 @@ class MyTrainer():
         
         # Parameters to change!
         self.warmup = 0.01
-        self.cycles = 2
+        self.cycles = 1
         # self.pretrainSegmentation = self.nEpochs * (1/self.cycles + self.warmup)        # pretrain for first LR annealing cycle
         self.pretrainSegmentation = 0
-        self.peakLR = 5e-6
+        self.peakLR = 1e-5
         self.minLR = 1e-7
         self.currentEpoch = 0
         self.oversampleFG = 0.5
         self.oversampleRadius = 0.15
-        self.batchSize = 20
+        self.batchSize = 16
         self.clipGrad = True
         self.downsamplePatch = 2
         self.downsampleImg = 2
 
         self.trainingCompose = GetTrainingTransforms()
         self.valTestCompose = GetNoTransforms()
+        self.predSegPath = predSegPath
 
         self.clsLosses = []
         self.PCRPercentages = []
@@ -73,7 +74,7 @@ class MyTrainer():
 
         self.model = MyUNet(expectedPatchSize=PATCH_SIZE,
                             # expectedChannels=[1, 96, 192, 384, 768, 1024],
-                            expectedChannels=[1, 64, 128, 256, 384, 512],
+                            expectedChannels=[1, 64, 128, 256, 512, 768],
                             expectedStride=[2, 2, 2, 2, 2],
                             pretrainedDecoderPath=pretrainedDecoderPath,
                             patientDataPath=self.patientDataPath,
@@ -87,7 +88,7 @@ class MyTrainer():
 
         dataTime = time()
         self.trDataloader, self.vlDataloader, self.tsDataloader = GetDataloaders(dataDir, self.patientDataPath, self.trainingCompose, self.valTestCompose,
-                                                                                 batchSize=self.batchSize, shuffle=True, test=self.test)
+                                                                                 batchSize=self.batchSize, shuffle=True, test=self.test, predSegPath=self.predSegPath)
         print(f"\tTook {FormatSeconds(time() - dataTime)}")
 
         # change optimizer and scheduler
@@ -331,16 +332,15 @@ class MyTrainer():
                         outs, rfpLosses = zip(*allOuts)
                         pcrOut = torch.cat(outs, dim=1)
                         pcrLoss = self.PCRloss(pcrOut.squeeze(-1), pcr)
-                        if torch.isnan(pcrLoss):
-                            print("PCR Loss is NAN, pcrOut:", pcrOut)
-                            import pdb
-                            pdb.set_trace()
                         rfpLoss = torch.stack(rfpLosses).mean()
-                        loss: torch.Tensor = pcrLoss + rfpLoss
+                        if torch.isnan(pcrLoss):
+                            loss = rfpLoss
+                        else:
+                            bceLossesVal.append(pcrLoss.item())
+                            loss: torch.Tensor = pcrLoss + rfpLoss
                         predPCRs.append(pcrOut.mean())
                         
-                        pcrLossesVal.append(loss.item())
-                        bceLossesVal.append(pcrLoss.item())
+                        pcrLossesVal.append(loss.item()) 
                         rfpLossesVal.append(rfpLoss.item())
 
                         print(f"\tValidation Batch {idx+1}/{nBatches}: {loss:.4f} = PCR Loss {pcrLoss:.4f} + RFP Loss {rfpLoss:.4f}", end='\r')
@@ -464,7 +464,7 @@ class MyTrainer():
         return
 
     def inference(self, stateDictPath: str, resultsTag: str,
-                  outputPath: str = "predSegmentationsCropped", outputPathPCR: str = "predPCR"):
+                  outputPath: str = "predSegmentationsCropped"):
         stateDictPath = os.path.join(self.outputFolder, stateDictPath)
         try:
             stateDict = torch.load(stateDictPath, map_location=self.device, weights_only=False)
@@ -484,10 +484,11 @@ class MyTrainer():
         self.model.eval()
 
         resultsFolder = f"outputs{self.tag}{resultsTag}"
-        outputPath = os.path.join(self.outputFolder, resultsFolder, outputPath)
-        outputPathPCR = os.path.join(self.outputFolder, resultsFolder, outputPathPCR)
-        os.makedirs(outputPath, exist_ok=True)
-        os.makedirs(outputPathPCR, exist_ok=True)
+        resultsPath = os.path.join(self.outputFolder, resultsFolder)
+        os.makedirs(resultsPath, exist_ok=True)
+        outputPath = os.path.join(resultsPath, outputPath)
+        if self.mode == MODE_SEG:
+            os.makedirs(outputPath, exist_ok=True)
 
         import pandas as pd
         from MAMAMIA.src.challenge.metrics import hausdorff_distance
@@ -597,7 +598,8 @@ class MyTrainer():
             print("===================")
             scoreDF["ROC AUC"] = auc
             scoreDF["PR AUC"] = prauc
-        savePath = os.path.join(self.outputFolder, resultsFolder, "scores.csv")
+        dfName = f"scores{'FromPredSeg' if self.predSegPath else ''}.csv"
+        savePath = os.path.join(resultsPath, dfName)
         scoreDF.to_csv(savePath, index=False)
 
         print(f"Saved results to: {savePath}")
@@ -684,7 +686,10 @@ if __name__ == "__main__":
     cat = None
     pool = True
     # tag = f"Jan13-{f'Cat{cat}' if cat is not None else 'Add'}{'Pool' if pool else 'Cls'}5Patches32Heads"
-    tag = "Jan16-RFPFixMaskHopefully"
+    tag = "Feb18-DetachRFE-FixMaskHopefully-TransformerDropout-768Channels"
+    # predSegPath = "/mnt/storageSSD/MAMA-MIA/mama-mia-challenge/transformerResults/SpatioTemporalWithSkips/outputsJan08-Cat120Pool1024Encoder5Patches32HeadsBestSeg/predSegmentationsCropped"
+    # predSegPath = "nnUNet_results/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_4_transformer_128_skips/outputs/pred_segmentations"
+    predSegPath = None
     bottleneck = BOTTLENECK_SPATIOTEMPORAL
     # bottleneck = BOTTLENECK_TRANSFORMERTS
     # bottleneck = BOTTLENECK_TRANSFORMERST
@@ -693,7 +698,7 @@ if __name__ == "__main__":
     mode = MODE_PCR
     test  = False        # testing the model on a few specific patients so we don't have to wait for the dataloader
     modelName = f"{bottleneck}{"PCR" if mode == MODE_PCR else "Seg"}{"With" if skips else "No"}Skips" #{"-TEST" if test else ""}"
-    trainer = MyTrainer(nEpochs=400, modelName=modelName, tag=tag, mode=mode, cat=cat, pool=pool, test=test)
+    trainer = MyTrainer(nEpochs=800, modelName=modelName, tag=tag, mode=mode, cat=cat, pool=pool, test=test, predSegPath=predSegPath)
     
     trainer.setup(dataDir, 
                   device, 

@@ -1,117 +1,92 @@
-import SimpleITK as sitk
-import os
-import numpy as np
 import pandas as pd
-from sklearn.metrics import roc_curve, auc
+import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.metrics import auc
+import os
 
-def scorePCR(predictionsDF: str,
+def calculate_metrics(df, label_col='pcr_label', pred_col='pcr_pred'):
+    """Helper to calculate performance metrics for a given dataframe slice."""
+    tp = ((df[pred_col] == 1) & (df[label_col] == 1)).sum()
+    tn = ((df[pred_col] == 0) & (df[label_col] == 0)).sum()
+    fp = ((df[pred_col] == 1) & (df[label_col] == 0)).sum()
+    fn = ((df[pred_col] == 0) & (df[label_col] == 1)).sum()
+
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    bal_acc = (sensitivity + specificity) / 2
+    
+    return {
+        'Sensitivity': sensitivity,
+        'Specificity': specificity,
+        'Precision': precision,
+        'Balanced Accuracy': bal_acc,
+        'Count': len(df)
+    }
+
+def scorePCR(predictionsDF_path: str,
              threshold: float = 0.5,
-             clinicalInfoPath: str = rf"{os.environ["MAMAMIA_DATA"]}/clinical_and_imaging_info.xlsx"):
-    df = pd.read_excel(clinicalInfoPath, sheet_name="dataset_info")
+             clinicalInfoPath: str = rf"{os.environ.get('MAMAMIA_DATA')}/clinical_and_imaging_info.xlsx"):
+    
+    # 1. Load Data
+    df_clinical = pd.read_excel(clinicalInfoPath, sheet_name="dataset_info")
+    predDF = pd.read_csv(predictionsDF_path)
 
-    predDF = pd.read_csv(predictionsDF)
+    # 2. Normalize IDs for Merging
+    df_clinical['join_id'] = df_clinical['patient_id'].astype(str).str.lower()
+    predDF['join_id'] = predDF['Patient ID'].astype(str).str.lower()
 
-    # Update scoring script to use 'pcr_prob' for predictions
-    # predDF['pcr_pred'] = (predDF['pcr_prob'] > threshold).astype(int)
-    # predDF['pcr_label'] = predDF['patient_id'].apply(lambda pid: df.loc[df['patient_id'] == pid, 'pcr'].values[0])
-    predDF['pcr_label'] = predDF['pcr']
-    predDF['correct'] = (predDF['pcr_pred'] == predDF['pcr_label']).astype(int)
+    # 3. Clean and Group Clinical Variables before merging
+    # --- Menopause Status ---
+    df_clinical['menopause'] = df_clinical['menopause'].fillna('unknown').astype(str).str.lower()
+    df_clinical['menopause'] = df_clinical['menopause'].apply(
+        lambda x: 'post' if 'post' in x else ('pre' if ('pre' in x or 'peri' in x) else x)
+    )
 
-    predDF.to_csv(predictionsDF, index=False)
+    # --- Tumor Subtype (Group Luminal) ---
+    df_clinical['tumor_subtype'] = df_clinical['tumor_subtype'].fillna('unknown').astype(str).str.lower()
+    df_clinical['tumor_subtype'] = df_clinical['tumor_subtype'].apply(
+        lambda x: 'luminal' if 'luminal' in x else x
+    )
 
-    # predDF['pcr_pred'] = 0
-    # predDF['correct'] = predDF['pcr_label'] == predDF['pcr_pred']
+    # --- Age Binning ---
+    age_bins = [0, 40, 50, 60, 120]
+    age_labels = ['0-40', '41-50', '51-60', '61+']
+    df_clinical['age_group'] = pd.cut(df_clinical['age'], bins=age_bins, labels=age_labels)
 
-    print("Percentage of correct predictions:",
-          predDF['correct'].mean() * 100, "%")
-    groups = ['DUKE', 'ISPY1', 'ISPY2', 'NACT']
-    avg_accuracy = {group : predDF[predDF['patient_id'].str.contains(group, na=False)]['correct'].astype(int).mean() \
-                    for group in groups}
-    print("Average accuracy per group:")
-    for group, accuracy in avg_accuracy.items():
-        print(f"{group}: {accuracy * 100:.2f}%")
+    # 4. Merge Clinical Info into Predictions
+    predDF = predDF.merge(df_clinical, on='join_id', how='inner')
 
-    # Calculate Specificity, Sensitivity, Recall, and Precision for each dataset group
-    # Include both Precision and Balanced Accuracy calculations
-    metrics = ['Specificity', 'Sensitivity', 'Precision', 'Balanced Accuracy']
-    results = {group: {metric: 0 for metric in metrics} for group in groups}
+    # 5. Generate Predictions based on threshold
+    predDF['pcr_pred'] = (predDF['Pred PCR'] > threshold).astype(int)
+    predDF['pcr_label'] = predDF['PCR']
+    
+    print(f"Overall Accuracy: { (predDF['pcr_pred'] == predDF['pcr_label']).mean() * 100:.2f}%")
+    print("-" * 30)
 
-    for group in groups:
-        group_df = predDF[predDF['patient_id'].str.contains(group, na=False)]
-        tp = ((group_df['pcr_pred'] == 1) & (group_df['pcr_label'] == 1)).sum()
-        tn = ((group_df['pcr_pred'] == 0) & (group_df['pcr_label'] == 0)).sum()
-        fp = ((group_df['pcr_pred'] == 1) & (group_df['pcr_label'] == 0)).sum()
-        fn = ((group_df['pcr_pred'] == 0) & (group_df['pcr_label'] == 1)).sum()
+    # 6. Iterate through each grouping variable
+    group_vars = ['age_group', 'tumor_subtype', 'menopause']
 
-        results[group]['Specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0
-        results[group]['Sensitivity'] = tp / (tp + fn) if (tp + fn) > 0 else 0
-        results[group]['Precision'] = tp / (tp + fp) if (tp + fp) > 0 else 0
-        results[group]['Balanced Accuracy'] = (results[group]['Sensitivity'] + results[group]['Specificity']) / 2
-
-    print("Metrics per group:")
-    for group, metrics in results.items():
-        print(f"{group}:")
-        for metric, value in metrics.items():
-            print(f"  {metric}: {value * 100:.2f}%")
-
-    # Calculate overall metrics for the full dataset
-    overall_metrics = ['Specificity', 'Sensitivity', 'Precision', 'Balanced Accuracy']
-    overall_results = {metric: 0 for metric in overall_metrics}
-
-    tp = ((predDF['pcr_pred'] == 1) & (predDF['pcr_label'] == 1)).sum()
-    tn = ((predDF['pcr_pred'] == 0) & (predDF['pcr_label'] == 0)).sum()
-    fp = ((predDF['pcr_pred'] == 1) & (predDF['pcr_label'] == 0)).sum()
-    fn = ((predDF['pcr_pred'] == 0) & (predDF['pcr_label'] == 1)).sum()
-
-    overall_results['Specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0
-    overall_results['Sensitivity'] = tp / (tp + fn) if (tp + fn) > 0 else 0
-    overall_results['Precision'] = tp / (tp + fp) if (tp + fp) > 0 else 0
-    overall_results['Balanced Accuracy'] = (overall_results['Sensitivity'] + overall_results['Specificity']) / 2
-
-    print("Overall metrics:")
-    for metric, value in overall_results.items():
-        print(f"  {metric}: {value * 100:.2f}%")
-
-    # Generate ROC curve by evaluating predictions across thresholds
-    thresholds = np.linspace(0, 1, 1000)
-    tpr_list = []
-    fpr_list = []
-
-    for threshold in thresholds:
-        predDF['pcr_pred'] = (predDF['pcr_prob'] > threshold).astype(int)
-        tp = ((predDF['pcr_pred'] == 1) & (predDF['pcr_label'] == 1)).sum()
-        tn = ((predDF['pcr_pred'] == 0) & (predDF['pcr_label'] == 0)).sum()
-        fp = ((predDF['pcr_pred'] == 1) & (predDF['pcr_label'] == 0)).sum()
-        fn = ((predDF['pcr_pred'] == 0) & (predDF['pcr_label'] == 1)).sum()
-
-        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
-        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
-
-        tpr_list.append(tpr)
-        fpr_list.append(fpr)
-
-    roc_auc = auc(fpr_list, tpr_list)
-
-    # Print optimal threshold
-    optimal_idx = np.argmax(np.array(tpr_list) - np.array(fpr_list))
-    optimal_threshold = thresholds[optimal_idx]
-    print(f"Optimal threshold: {optimal_threshold}")
-    print(f"AUC:", roc_auc)
-
-    # Plot ROC curve
-    plt.figure()
-    plt.plot(fpr_list, tpr_list, color='darkorange', lw=2, label='ROC curve')
-    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('Receiver Operating Characteristic')
-    plt.legend(loc="lower right")
-    plt.show()
-    plt.savefig(os.path.join(os.path.dirname(predictionsDF), 'ROC.png'))
+    for var in group_vars:
+        if var not in predDF.columns:
+            print(f"Skipping {var}: Column not found.")
+            continue
+            
+        print(f"\n--- Metrics Grouped by: {var.upper()} ---")
+        
+        # Sort groups for consistent display
+        unique_groups = sorted(predDF[var].dropna().unique())
+        
+        for val in unique_groups:
+            subset = predDF[predDF[var] == val]
+            if subset.empty:
+                continue
+                
+            m = calculate_metrics(subset)
+            print(f"Group: {val} (n={m['Count']})")
+            print(f"  Sens: {m['Sensitivity']*100:.2f}% | Spec: {m['Specificity']*100:.2f}% | BalAcc: {m['Balanced Accuracy']*100:.2f}%")
 
 if __name__ == "__main__":
-    predDFpath = r"nnUNet_results/Dataset104_cropped_3ch_breast/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_4_transformer_joint_JD_last_try/outputs/pcr_scores.csv" 
-    scorePCR(predDFpath, threshold=0.4444444)
-    # from MAMAMIA.src.challenge.scoring_task2 import doScoring
-    # doScoring(os.path.dirname(predDFpath))
+    # Ensure you use the raw string path
+    path = r"transformerResults/SpatioTemporalPCRNoSkips/outputsJan16-RFPFixMaskHopefullyBestPCR/scoresOG.csv"
+    scorePCR(path, threshold=-0.85127)

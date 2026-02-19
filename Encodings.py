@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import pandas as pd
 
-class RiskFactorPrediction(nn.Module):
+class RiskFactorEmbedding(nn.Module):
     def __init__(self, patientDataDF: pd.DataFrame, embDim: int, featureDim: int):
         super().__init__()
         self.patientDataDF = patientDataDF
@@ -14,51 +14,38 @@ class RiskFactorPrediction(nn.Module):
             nn.Linear(embDim, self.hiddenDim),
             nn.LayerNorm(self.hiddenDim),
             nn.ReLU(),
-            # nn.Dropout(),
-            nn.Linear(self.hiddenDim, self.outDim)
+            nn.Dropout(),
+            nn.Linear(self.hiddenDim, self.outDim*2)
         )
 
-        self.lossCat = nn.BCEWithLogitsLoss()
-        self.lossCont = nn.MSELoss()
+        self.loss = nn.CrossEntropyLoss()
 
     def forward(self, latent: torch.Tensor):
-        return self.pred(latent.flatten(1))      # [B, E] -> [B, 45]
+        return self.pred(latent.flatten(1))      # [B, E] -> [B, 30*2]
     
-    def maskRiskFactors(self, riskFactors: list[torch.Tensor], pred: torch.Tensor, continuousIndices: list[int] = [0]):
-        mask = [(x != 0).any().item() for x in riskFactors]
-        mask[0] = (riskFactors[0] != -1).any().item()       # only Age is not one-hot encoded, so look for missing value of -1
-        loss = []
-        out = []
-        idx = 0
-        for i, factor in enumerate(riskFactors):
-            l = len(factor)
-            x = pred[idx:idx+l]
+    def maskRiskFactors(self, riskFactors: list[torch.Tensor], pred: torch.Tensor, mask: torch.Tensor):
+        pred = torch.softmax(pred, dim=-1)[:,1]
+        preds = mask * pred
+        
+        if torch.all(mask == 0):
+            loss = None
+        else:
+            loss = self.loss(preds, mask*riskFactors) / mask.sum()
 
-            if mask[i] == 0:
-                out.append(torch.sigmoid(x))                # use sigmoid of prediction to act as "one-hot" encoding
-            else:
-                out.append(factor + (x - x.detach()))       # reparameterize w.r.t. x to not break gradient flow
-                if i in continuousIndices:
-                    loss.append(self.lossCont(torch.sigmoid(x), factor))
-                else:
-                    loss.append(self.lossCat(x, factor))
-            idx += l
+        out = (1 - mask) * riskFactors + preds
 
-        return torch.cat(out, dim=-1), torch.stack(loss).mean() if len(loss) else None
+        return out, loss
 
 class PatientDataEncoding(nn.Module):
     def __init__(self, patientDataPath, embDim):
         super().__init__()
-        self.ageMin = 21
-        self.ageMax = 77
         self.patientDataDF = pd.read_excel(patientDataPath, sheet_name="dataset_info")
 
-        self.inFeatures = 45             # one-hot encoding for most variables, continuous for age
+        self.inFeatures = 33             # one-hot encoding for all variables
         self.outFeatures = 64
-        self.patientDataEmbed = nn.Linear(self.inFeatures, self.outFeatures)
-
-        self.ageEncode  = lambda x: torch.tensor([(x - self.ageMin) / (self.ageMax - self.ageMin)], dtype=torch.float32) if x is not None \
-            else torch.tensor([-1], dtype=torch.float32)   # normalize age to [0, 1] range, default to 0.5 if None
+        self.patientDataEmbed = nn.Sequential(nn.Dropout(0.2), nn.Linear(self.inFeatures, self.outFeatures))
+        ageBins = [0, 40, 50, 60, 100]
+        self.ageEncode  = lambda x: torch.tensor([x is not None and x > ageBins[i] and x <= ageBins[i+1] for i in range(len(ageBins)-1)], dtype=torch.float)
         self.binaryEncode = lambda x: torch.tensor([x==0, x==1], dtype=torch.float)
         self.menoEncode = lambda x: torch.tensor([x=="pre", x=="post"], dtype=torch.float)
 
@@ -73,20 +60,19 @@ class PatientDataEncoding(nn.Module):
         
         bmiClasses = ["underweight", "normal", "overweight", "obesity_class_1", "obesity_class_2", "obesity_class_3"]
         self.bmiEncode = lambda x: torch.tensor([b in str(x) for b in bmiClasses], dtype=torch.float)
-        
-        nacAgents = ["ABT 888", "AMG 386", "Anthracycline", "Carboplatin", "FEC100", "Ganetespib", "Ganitumab", "MK-2206", 
-                     "Neratinib", "Paclitaxel", "Pembrolizumab", "Pertuzumab", "T-DM1", "Taxane", "Trastuzumab"]
-        self.nacEncode = lambda x: torch.tensor([a in str(x) for a in nacAgents], dtype=torch.float)
 
-        self.riskFactorPred = RiskFactorPrediction(self.patientDataDF, embDim, self.inFeatures)
+        self.riskFactorPred = RiskFactorEmbedding(self.patientDataDF, embDim, self.inFeatures)
 
     def forward(self, x: torch.Tensor, patientIDs: list[str]):
         patientData = CleanPatientData(self.patientDataDF, patientIDs, columns=[
             'age', 'anti_her2_neu_therapy', 'er', 'hr', 'pr', 'menopause', 'multifocal_cancer',
-            'nottingham_grade', 'breast_density', 'tumor_subtype', 'bmi_group', 'nac_agent'
+            'nottingham_grade', 'breast_density', 'tumor_subtype', 'bmi_group'
         ])
 
-        preds = self.riskFactorPred(x)
+        continuousIndices = [0]         # only age is continuous
+
+        preds: torch.Tensor = self.riskFactorPred(x)
+        preds = preds.reshape(preds.shape[0], -1, 2)
         loss = []
         encodingTensors = []
         for idx, md in enumerate(patientData):
@@ -101,17 +87,25 @@ class PatientDataEncoding(nn.Module):
             density = self.densityEncode(md['breast_density'])
             subtype = self.tumorEncode(md['tumor_subtype'])
             bmi = self.bmiEncode(md['bmi_group'])
-            nac = self.nacEncode(md['nac_agent'])
 
-            encodings = [age, antiHER2, er, hr, pr, meno, multifocal, nott, density, subtype, bmi, nac]
+            encodings = [age, antiHER2, er, hr, pr, meno, multifocal, nott, density, subtype, bmi]
             encodings = [t.to(x.device) for t in encodings]
+            mask = [(x != 0).any().item() for x in encodings]
+            for ci in continuousIndices:
+                mask[ci] = (encodings[ci] != -1).any().item()       # look for missing value of -1
+
+            mask = [
+                val 
+                for idx, val in enumerate(mask) 
+                for _ in range(len(encodings[idx]))
+            ]
 
             # RISK FACTOR PREDICTION
-            encodings, l = self.riskFactorPred.maskRiskFactors(encodings, preds[idx])
+            encodings, l = self.riskFactorPred.maskRiskFactors(torch.cat(encodings), preds[idx], torch.tensor(mask, device=x.device, dtype=torch.int))
             if l is not None: loss.append(l)         # accumulate prediction loss
             encodingTensors.append(encodings)
 
-        embeddings: torch.Tensor = self.patientDataEmbed(torch.stack(encodingTensors))      #[B, outFeatures]
+        embeddings: torch.Tensor = self.patientDataEmbed(torch.stack(encodingTensors).detach())      #[B, outFeatures]
 
         return embeddings, torch.stack(loss).mean() if len(loss) else 0
     

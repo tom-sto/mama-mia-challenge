@@ -90,8 +90,8 @@ def collate(x):
     return x
 
 def GetDataloaders(dataDir: str, patientDataPath: str, trAugCompose, vlTsAugCompose,
-                   downsampleFactor: int = 1, batchSize: int = 1, shuffle=True, test=False):
-    data = GetData(dataDir, patientDataPath, downsampleFactor, test=test)
+                   downsampleFactor=1, batchSize=1, shuffle=True, test=False, predSegPath=None):
+    data = GetData(dataDir, patientDataPath, downsampleFactor, test=test, predSegPath=predSegPath)
 
     def makeLoader(split: str, augmentCompose):
         dataset = CustomDataset(data=data[split], augmentCompose=augmentCompose)

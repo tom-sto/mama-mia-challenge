@@ -3,7 +3,7 @@ from helpers import EPS
 
 class PCRLoss(nn.Module):
     def __init__(self):
-        super(PCRLoss, self).__init__()
+        super().__init__()
         self.bce = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(2.4))  # this data set sees 70% negative, 30% positive
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor):
@@ -20,7 +20,7 @@ class PCRLoss(nn.Module):
 
         loss: torch.Tensor = self.bce(logits[mask].float(), targets[mask].float())
 
-        return loss
+        return loss * 2
     
 class PCRLossWithConfidence(nn.Module):
     def __init__(self, pos_weight=2.4):

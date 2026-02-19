@@ -130,7 +130,7 @@ def defaultPhaseDict():
 def defaultSplitDict():
     return defaultdict(defaultPhaseDict)
 
-def GetData(parentDir: str, patientDataPath: str, downsampleFactor: int, test: bool = False):
+def GetData(parentDir: str, patientDataPath: str, downsampleFactor: int, test: bool = False, predSegPath=None):
     print("Collecting data...")
 
     # Load patient metadata once
@@ -170,7 +170,11 @@ def GetData(parentDir: str, patientDataPath: str, downsampleFactor: int, test: b
             # Get phase files for the patient
             phases = sorted(glob.glob(os.path.join(trtsDir, f"{patient_id}_0*.zarr")))[:nPhases]
             dmap = os.path.join(trtsDir, f"{patient_id}_dmap.zarr")
-            seg = os.path.join(trtsDir, f"{patient_id}_seg.zarr")
+            if predSegPath and trts == "testing":
+                # seg = os.path.join(predSegPath, f"{patient_id}_pred.nii")
+                seg = os.path.join(predSegPath, f"{patient_id}.nii.gz")
+            else:
+                seg = os.path.join(trtsDir, f"{patient_id}_seg.zarr")
             pcr = df[df["patient_id"] == patient_id.upper()]["pcr"].fillna(-1).iloc[0]
             
             bboxPath = os.path.join(trtsDir, f"{patient_id}_bbox.txt")
@@ -197,10 +201,14 @@ def GetData(parentDir: str, patientDataPath: str, downsampleFactor: int, test: b
 
     return dict(data)  # Convert defaultdict to regular dict for return
 
-def LoadImages(phases, dmap, seg, bbox, downsampleFactor):
+def LoadImages(phases: list[str], dmap: str, seg: str, bbox, downsampleFactor: int):
     phaseZarrs  = np.stack([Downsample(zarr.load(p), downsampleFactor) for p in phases])
     dmapZarr    = Downsample(zarr.load(dmap), downsampleFactor) if os.path.exists(dmap) else None
-    segZarr     = Downsample(zarr.load(seg), downsampleFactor)
+    if seg.endswith(".zarr"):
+        segZarr = Downsample(zarr.load(seg), downsampleFactor)
+    else:
+        segArr = sitk.GetArrayFromImage(sitk.ReadImage(seg))
+        segZarr = Downsample(segArr, downsampleFactor)
     return phaseZarrs, dmapZarr, segZarr, bbox
 
 def GetPatches(phases: list[torch.Tensor], dmap: list[torch.Tensor], seg: list[torch.Tensor], patchSize: int,
